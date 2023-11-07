@@ -50,6 +50,8 @@ void Laplacian_smooth_mesh(DrawableTrimesh<> &, const double);
 
 Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> &, const Eigen::SparseMatrix<double> &);
 
+vector<int> Find_Critical_Points(const DrawableTrimesh<> &, const Eigen::VectorXd &);
+
 //====================== UTILITIES =============================================
 
 void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
@@ -71,6 +73,40 @@ void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
 }
 
 void progress_log(uint i) { std::cout <<  i << " "; std::cout.flush(); }
+
+void print_statistics(const vector<vector<int>> &c)
+{
+  for (uint i=0;i<c.size();i++) {
+    cout << "Field " << i << ": ";
+    std::vector<int>::iterator cit;
+    int k = *std::max_element(c[i].begin(),c[i].end());
+    vector<int> counts(k+1,0);
+    for (uint vid=0;vid<c[i].size();vid++)
+      if (c[i][vid]!=-1) counts[c[i][vid]]++;
+    cout << counts[0] << " minima, " << counts[1] << " maxima, ";
+    for (uint j=2; j<=k; j++) cout << counts[j] << " " << j-1 << "-saddles ";
+    cout << endl;
+  }
+}
+
+void set_critical_points(const vector<int> &c, vector<DrawableSphere> &p)
+{
+  for (auto i=0;i<c.size();i++) {
+    if (c[i]==-1) continue;
+    p[i].radius = 0.5;
+    if (c[i]==0) p[i].color = cinolib::Color::BLUE();
+    else if (c[i]==1) p[i].color = cinolib::Color::RED();
+    else p[i].color = cinolib::Color::GREEN();
+  }
+}
+
+void reset_critical_points(vector<DrawableSphere> &p)
+{
+  for (auto i=0;i<p.size();i++) {
+    p[i].radius = 0.0;
+    p[i].color = cinolib::Color::BLACK();
+  }
+}
 
 //=============================== INPUT FIELD ==================================
 Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
@@ -137,9 +173,16 @@ int main(int argc, char **argv) {
   vector<Eigen::VectorXd> efields = Build_discrete_scale_space(m,f,time_step,nlevels);
   for (auto i=0;i<efields.size();i++) {
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
-    progress_log(i);
+    // progress_log(i);
   }
   cout << endl;
+
+  cout << "Finding critical points: " << flush;
+  vector<vector<int>> critical(nlevels,vector<int>(nverts));
+  for (auto i=0;i<efields.size();i++) 
+    critical[i] = Find_Critical_Points(m,efields[i]);
+  cout << endl;
+  print_statistics(critical);
 
   // GUI
   GLcanvas gui;
@@ -147,6 +190,13 @@ int main(int argc, char **argv) {
   float point_size = 0.002;
   int selected_entry = 0;
   bool show_sf = false;
+  bool show_cp = false;
+
+  vector<DrawableSphere> points(nverts);
+  for (auto i = 0; i < points.size(); ++i) {
+    points[i]=DrawableSphere(m.vert(i),0.0,cinolib::Color::BLACK());
+    gui.push(&(points[i]));
+  }
  
   gui.show_side_bar = true;
   gui.push(&m);
@@ -162,13 +212,19 @@ int main(int argc, char **argv) {
         m.show_poly_color();
       }
     } 
-    // ImGui::SameLine();
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Show Critical Points", &show_cp)) {
+      if (show_cp)
+        set_critical_points(critical[selected_entry],points);
+      else reset_critical_points(points);
+      m.updateGL();
+    } 
     // if (ImGui::Button("Dummy button 2")) {
     //   auto name0 = "CMFC" + name + ".obj";
     //   write_OBJ(name0.c_str(), obj_wrapper(m.vector_verts()),
     //             m.vector_polys());
     // }
-    if (ImGui::SliderFloat2("Clamp values", clamp_limits, f.minCoeff(), f.maxCoeff(),"%.2f",ImGuiSliderFlags_Logarithmic)) {
+    if (ImGui::SliderFloat2("Clamp values", clamp_limits, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
       if (show_sf) {
         phi = Rescale_field(fields[selected_entry],clamp_limits);
         phi.copy_to_mesh(m);
@@ -179,8 +235,12 @@ int main(int argc, char **argv) {
       if (show_sf) {
         phi = Rescale_field(fields[selected_entry],clamp_limits);
         phi.copy_to_mesh(m);
-        m.updateGL();
       }
+      if (show_cp) {
+        reset_critical_points(points);
+        set_critical_points(critical[selected_entry],points);
+      }
+      if (show_sf || show_cp) m.updateGL();
     }
   };
 
@@ -314,4 +374,30 @@ Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m, const Eigen::SparseM
   }
   return H;
 }
+
+vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const Eigen::VectorXd &f)
+{
+  // -1 regular; 0 minimum; 1 maximum; k>1 (k-1)-saddle
+  vector<int> buf(f.size());
+  uint nv = m.num_verts();
+  for(uint vid=0; vid<nv; vid++) {
+    vector<uint> neigh = m.vert_ordered_verts_link(vid);
+    int nn = neigh.size();
+    vector<bool> sign(nn);    // true iff neighbor is smaller
+    for (uint j=0;j<nn;j++) { // cycle on neighbors
+      if (f(neigh[j])==f(vid)) sign[j] = (vid>neigh[j]); // solve ties with vertex index
+      else if (f(neigh[j])<f(vid)) sign[j] = true;
+      else sign[j] = false;
+    }
+    uint count = 0;
+    for (uint j=0; j<nn; j++)
+      if (sign[j]!=sign[(j+1)%nn]) count++;
+    if (count==0) buf[vid] = sign[0]?1:0;       // max or min depending on sign
+    else if (count==2) buf[vid] = -1;           // regular
+    else if (count%2 == 0) buf[vid] = count/2;  // k-saddle
+    else cout << "Error at vertex " << vid << ": odd number of change sign\n";
+  }
+  return buf;
+}
+
 
