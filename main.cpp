@@ -50,7 +50,62 @@ void Laplacian_smooth_mesh(DrawableTrimesh<> &, const double);
 
 Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> &, const Eigen::SparseMatrix<double> &);
 
-void InvertSparseMatrix(Eigen::SparseMatrix<double> &);
+//====================== UTILITIES =============================================
+
+void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
+{
+    // Iterate over outside
+  for(int k=0; k<Y.outerSize(); ++k)
+  {
+    // Iterate over inside
+    for(typename Eigen::SparseMatrix<double>::InnerIterator it(Y,k); it; ++it)
+    {
+      if (it.col() == it.row())
+      {
+        double v = it.value();
+        v = 1.0/v;
+        Y.coeffRef(it.row(),it.col()) = v;
+      }
+    }
+  }
+}
+
+void progress_log(uint i) { std::cout <<  i << " "; std::cout.flush(); }
+
+//=============================== INPUT FIELD ==================================
+Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m, float clamp_limits[])
+{
+  // field is mean curvature 
+  Eigen::SparseMatrix<double> ML  = laplacian(m, COTANGENT);
+  Eigen::SparseMatrix<double> MM = mass_matrix(m);
+  InvertSparseMatrix(MM);
+  ML = MM * ML;
+  Eigen::VectorXd f = Mean_curvature(m,ML);
+  // set clamp limits to sigma
+  double mean = f.sum()/f.size();
+  Eigen::VectorXd s(f);
+  for (auto i=0;i<s.size();i++) s(i) = (s(i)-mean)*(s(i)-mean);
+  double sigma = sqrt(s.sum()/s.size());
+  clamp_limits[0] = mean - sigma;
+  clamp_limits[1] = mean + sigma;
+  cout << "Field limits: " << f.minCoeff() << ", " << f.maxCoeff() 
+      << "; clamp limits: " << clamp_limits[0] << ", " << clamp_limits[1] << endl;
+  return f;
+}
+
+ScalarField Rescale_field(const vector<double> & f, float cl[])
+{
+  cout << "Rescale in [" << cl[0] << "," << cl[1] << "]\n";
+  ScalarField sf(f);
+  cout << "Actual range [" << sf.minCoeff() << "," << sf.maxCoeff() << "] clapmed to [" << cl[0] << "," << cl[1] << "]\n";
+  for (auto i=0;i<sf.size();i++) 
+    if (sf(i)<cl[0]) sf(i) = 0.0;
+    else if (sf(i) > cl[1]) sf(i) = 1.0;
+    else sf(i) = (sf(i)-cl[0])/(cl[1]-cl[0]);
+  cout << "Rescaled range [" << sf.minCoeff() << "," << sf.maxCoeff() << "]\n";
+  return sf;
+}
+
 //=============================== MAIN =========================================
 
 int main(int argc, char **argv) {
@@ -58,31 +113,28 @@ int main(int argc, char **argv) {
 
   //INPUT MESH
   auto name = std::string(argv[1]);
-  auto s = "../data/" + name + ".off";
+  auto s = "../data/" + name;
   DrawableTrimesh<> m(s.c_str());
   uint nverts = m.num_verts();
-  m.normalize_bbox();
-  m.center_bbox();   
-  m.vert_data(0).normal;
-  m.vector_vert_normals();
+  // m.normalize_bbox();
+  // m.center_bbox();   
    
   // OUTPUT FIELDS
   uint nlevels = stoi(argv[2]); 
   vector<vector<double>> fields(nlevels,vector<double>(nverts));
 
+  // GENERATE FIELD
+  float clamp_limits[2];
+  Eigen::VectorXd f = Generate_field(m, clamp_limits);
+  // Eigen::VectorXd K = gaussian_curvature(m);
+
   // COMPUTE
   cout << "Computing discrete scale space: " << flush;
   double time_step = stod(argv[3]);
-  // Eigen::VectorXd K = gaussian_curvature(m);
-  Eigen::SparseMatrix<double> ML  = laplacian(m, COTANGENT);
-  Eigen::SparseMatrix<double> MM = mass_matrix(m);
-  InvertSparseMatrix(MM);
-  ML = MM * ML;
-  Eigen::VectorXd K = Mean_curvature(m,ML);
-  vector<Eigen::VectorXd> efields = Build_discrete_scale_space(m,K,time_step,nlevels);
+  vector<Eigen::VectorXd> efields = Build_discrete_scale_space(m,f,time_step,nlevels);
   for (auto i=0;i<efields.size();i++) {
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
-    cout <<  "*" << flush << flush;
+    progress_log(i);
   }
   cout << endl;
 
@@ -94,13 +146,15 @@ int main(int argc, char **argv) {
 
   bool show_sf = false;
  
-  gui.draw_side_bar();
-  gui.push(&m, false);
+  gui.show_side_bar = true;
+  gui.push(&m);
+  // m.show_poly_color();
+
   gui.callback_app_controls = [&]() {
     if (ImGui::Checkbox("Show Scalar Field", &show_sf)) {
       if (show_sf) {
-        phi = ScalarField(fields[selected_entry]);
-//        phi.normalize_in_01();
+        phi = Rescale_field(fields[selected_entry],clamp_limits);
+        // phi.normalize_in_01();
         phi.copy_to_mesh(m);
         m.show_texture1D(TEXTURE_1D_HSV);
       } else {
@@ -117,13 +171,18 @@ int main(int argc, char **argv) {
     //   write_OBJ(name0.c_str(), obj_wrapper(m.vector_verts()),
     //             m.vector_polys());
     // }
-    if (ImGui::SliderInt("Choose level", &selected_entry, 0,
-                         nlevels - 1)) {
+    if (ImGui::SliderFloat2("Clamp values", clamp_limits, f.minCoeff(), f.maxCoeff(),"%.2f",ImGuiSliderFlags_Logarithmic)) {
       if (show_sf) {
-        phi = ScalarField(fields[selected_entry]);
-        // phi.normalize_in_01();
+        phi = Rescale_field(fields[selected_entry],clamp_limits);
         phi.copy_to_mesh(m);
-        m.show_texture1D(TEXTURE_1D_HSV);
+        m.updateGL();
+      }
+    }
+    if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
+      if (show_sf) {
+        phi = Rescale_field(fields[selected_entry],clamp_limits);
+       phi.copy_to_mesh(m);
+        m.updateGL();
       }
     }
   };
@@ -254,26 +313,9 @@ Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m, const Eigen::SparseM
   for(uint vid=0; vid<nv; ++vid) {
     H(vid)=Hn.row(vid).norm();
     vec3d Hni(Hn(vid,0),Hn(vid,1),Hn(vid,2));
-    if (Hni.dot(m.vert_data(vid).normal())<0) H(vid) = -H(vid); 
+    vec3d n = m.vert_data(vid).normal;      //vert_data(vid).normal;
+    if (Hni.dot(n)<0) H(vid) = -H(vid); 
   }
   return H;
 }
 
-void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
-{
-    // Iterate over outside
-  for(int k=0; k<Y.outerSize(); ++k)
-  {
-    // Iterate over inside
-    for(typename MatY::InnerIterator it (Y,k); it; ++it)
-    {
-      if(it.col() == it.row())
-      {
-        Scalar v = it.value();
-        assert(v != 0);
-        v = ((Scalar)1.0)/v;
-        Y.coeffRef(it.row(),it.col()) = v;
-      }
-    }
-  }
-}
