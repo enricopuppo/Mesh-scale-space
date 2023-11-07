@@ -73,36 +73,39 @@ void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
 void progress_log(uint i) { std::cout <<  i << " "; std::cout.flush(); }
 
 //=============================== INPUT FIELD ==================================
-Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m, float clamp_limits[])
+Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
 {
   // field is mean curvature 
   Eigen::SparseMatrix<double> ML  = laplacian(m, COTANGENT);
   Eigen::SparseMatrix<double> MM = mass_matrix(m);
   InvertSparseMatrix(MM);
   ML = MM * ML;
-  Eigen::VectorXd f = Mean_curvature(m,ML);
-  // set clamp limits to sigma
+  return Mean_curvature(m,ML);
+  // return gaussian_curvature(m);
+}
+
+void Clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]) 
+{
+  // set clamp limits to sigma_multiplier * sigma
   double mean = f.sum()/f.size();
   Eigen::VectorXd s(f);
   for (auto i=0;i<s.size();i++) s(i) = (s(i)-mean)*(s(i)-mean);
   double sigma = sqrt(s.sum()/s.size());
-  clamp_limits[0] = mean - sigma;
-  clamp_limits[1] = mean + sigma;
+  cl[0] = mean - sigma_multiplier * sigma;
+  cl[1] = mean + sigma_multiplier * sigma;
   cout << "Field limits: " << f.minCoeff() << ", " << f.maxCoeff() 
-      << "; clamp limits: " << clamp_limits[0] << ", " << clamp_limits[1] << endl;
-  return f;
+      << "; clamp limits: " << cl[0] << ", " << cl[1] << endl;
 }
 
 ScalarField Rescale_field(const vector<double> & f, float cl[])
 {
-  cout << "Rescale in [" << cl[0] << "," << cl[1] << "]\n";
   ScalarField sf(f);
-  cout << "Actual range [" << sf.minCoeff() << "," << sf.maxCoeff() << "] clapmed to [" << cl[0] << "," << cl[1] << "]\n";
+  cout << "Actual range [" << sf.minCoeff() << "," << sf.maxCoeff() << "] clapmed to [" << cl[0] << "," << cl[1] << "] ";
   for (auto i=0;i<sf.size();i++) 
     if (sf(i)<cl[0]) sf(i) = 0.0;
     else if (sf(i) > cl[1]) sf(i) = 1.0;
     else sf(i) = (sf(i)-cl[0])/(cl[1]-cl[0]);
-  cout << "Rescaled range [" << sf.minCoeff() << "," << sf.maxCoeff() << "]\n";
+  cout << "rescaled in [" << sf.minCoeff() << "," << sf.maxCoeff() << "]\n";
   return sf;
 }
 
@@ -124,9 +127,9 @@ int main(int argc, char **argv) {
   vector<vector<double>> fields(nlevels,vector<double>(nverts));
 
   // GENERATE FIELD
+  Eigen::VectorXd f = Generate_field(m);
   float clamp_limits[2];
-  Eigen::VectorXd f = Generate_field(m, clamp_limits);
-  // Eigen::VectorXd K = gaussian_curvature(m);
+  Clamp_limits(f, 1, clamp_limits); // set clamp limits to sigma
 
   // COMPUTE
   cout << "Computing discrete scale space: " << flush;
@@ -143,13 +146,11 @@ int main(int argc, char **argv) {
   ScalarField phi;
   float point_size = 0.002;
   int selected_entry = 0;
-
   bool show_sf = false;
  
   gui.show_side_bar = true;
   gui.push(&m);
-  // m.show_poly_color();
-
+ 
   gui.callback_app_controls = [&]() {
     if (ImGui::Checkbox("Show Scalar Field", &show_sf)) {
       if (show_sf) {
@@ -161,10 +162,6 @@ int main(int argc, char **argv) {
         m.show_poly_color();
       }
     } 
-    // if (ImGui::Button("Dummy button 1")) {
-    //   string foldername = "../teaser/";
-    //   // do something
-    // }
     // ImGui::SameLine();
     // if (ImGui::Button("Dummy button 2")) {
     //   auto name0 = "CMFC" + name + ".obj";
@@ -181,7 +178,7 @@ int main(int argc, char **argv) {
     if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
       if (show_sf) {
         phi = Rescale_field(fields[selected_entry],clamp_limits);
-       phi.copy_to_mesh(m);
+        phi.copy_to_mesh(m);
         m.updateGL();
       }
     }
@@ -193,7 +190,6 @@ int main(int argc, char **argv) {
   //     vec2d click = gui.cursor_pos();
   //     if (gui.unproject(click, p)) {
   //       uint vid = m.pick_vert(p);
-
   //       m.vert_data(vid).color = Color::RED();
   //       m.updateGL();
   //     }
