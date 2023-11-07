@@ -1,84 +1,130 @@
-#include "diff_geo.h"
+// #include "diff_geo.h"
 #include "utilities.h"
-#include <cinolib/gl/glcanvas.h>
 #include <cinolib/io/write_OBJ.h>
 #include <cinolib/io/write_OFF.h>
 #include <cinolib/mean_curv_flow.h>
-#include <cinolib/meshes/drawable_trimesh.h>
+// #include <cinolib/meshes/drawable_trimesh.h>
 #include <fstream>
+#include <iostream>
 using namespace std;
 using namespace cinolib;
+
+//::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+double compute_theta(const DrawableTrimesh<> &m, const int tid, const int vid) {
+  uint k = m.poly_vert_offset(tid, vid);
+  uint vid1 = m.poly_vert_id(tid, (k + 1) % 3);
+  uint vid2 = m.poly_vert_id(tid, (k + 2) % 3);
+
+  vec3d v1 = m.vert(vid1)-m.vert(vid);
+  vec3d v2 = m.vert(vid2)-m.vert(vid);
+
+  double theta = v1.angle_rad(v2);
+
+  return theta;
+}
+
+double gaussian_curvature(const DrawableTrimesh<> &m,const int vid) {
+  double result = 0.;
+  vector<uint> star = m.adj_v2p(vid);
+
+  for (uint tid : star)
+    result += compute_theta(m, tid, vid);
+
+  return 2 * M_PI - result;
+}
+
+Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &m) {
+  Eigen::VectorXd result(m.num_verts());
+  for (uint i = 0; i < m.num_verts(); ++i)
+    result(i) = gaussian_curvature(m, i);
+  return result;
+}
+
+//::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen::VectorXd & f,
+         const double                   time_scalar)
+{
+    Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+    Eigen::SparseMatrix<double> MM = mass_matrix(m);
+
+    // backward euler time integration of heat flow equation
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
+    // return LLT.solve(MM * f);
+    Eigen::VectorXd x = LLT.solve(MM * f);
+    return x;
+}
+
+void Laplacian_smooth_mesh(DrawableTrimesh<> & m, const double time_scalar)
+{
+    Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+    Eigen::SparseMatrix<double> MM = mass_matrix(m);
+
+    // backward euler time integration of heat flow equation
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
+
+    uint nv = m.num_verts();
+    Eigen::VectorXd x(nv);
+    Eigen::VectorXd y(nv);
+    Eigen::VectorXd z(nv);
+
+    for(uint vid=0; vid<nv; ++vid) {
+      vec3d pos = m.vert(vid);
+      x[vid] = pos.x();
+      y[vid] = pos.y();
+      z[vid] = pos.z();
+    }
+
+    x = LLT.solve(MM * x);
+    y = LLT.solve(MM * y);
+    z = LLT.solve(MM * z);
+
+    for(uint vid=0; vid<m.num_verts(); ++vid) {
+      vec3d new_pos(x[vid], y[vid], z[vid]);
+      m.vert(vid) = new_pos;
+    }
+}
+
 
 //::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 //                                utility
 
 int main(int argc, char **argv) {
 
-  // auto s0 = "../finals/FAUST_shapes_off/" + std::string(argv[1]) + ".off";
-  // auto s1 = "../finals/FAUST_shapes_off/" + std::string(argv[2]) + ".off";
-  vector<string> names = {"lion", "hippo"};
+  vector<string> names = {"hippo", "lion"};
+  double time_step = 0.00001;
 
-  // vector<int> entries = {0, 1, 2, 3, 4, 5}; // centaur
-  // vector<int> entries = {0, 7}; // hand
-  //  vector<int> entries = {0, 1, 2, 3, 5, 6, 7, 8, 10}; // dog
-  // vector<int> entries = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}; // cat
-  // vector<int> entries = {0, 5, 6, 7, 10, 14, 15, 17}; // horse
-
-  // auto M = read_binary_matrix("michael10");
-  // auto diam = diameter(M);
-  // vector<string> methods = {"asa", "dif", "std"};
-  // auto entries = vector<int>{0, 7};
-  //  for (auto i = 0; i < 10; ++i) {
-  //    for (auto j = 0; j < 10; ++j) {
-  ///:::::::::::::::::::ERROR HEAT MAP MICHAEL:::::::::::::::::::
-  // for (auto name : names) {
-  //   for (auto method : methods) {
-  //     string filename = name + "_" + method + ".txt";
-  //     auto T = load_landmarks(filename);
-  //     auto err = error_on_michaels(M, T, diam);
-  //     write_file(err, "../err_" + filename);
-  //   }
-  // }
-
-  ///:::::::::::::::::::GEODESIC MATRIX and CMCF:::::::::::::::::::
-  for (auto name : names) {
-    // for (auto i : entries) {
-
-    // for (auto i = 0; i < 10; ++i) {
-    //   for (auto j = 0; j < 10; ++j) {
+   for (auto name : names) {
     vector<vec3d> pos;
     vector<vector<uint>> tris;
-    std::vector<vec3d> tex, nor;
-    std::vector<std::vector<uint>> poly_tex, poly_nor;
-    std::vector<Color> poly_col;
-    std::vector<int> poly_lab;
-    auto s = "../../../Models/" + name + "_remeshed.off";
-    // auto s = "../../../Models/TOSCA/Meshes/horse" + to_string(i) + ".off";
-    // auto s = "../../../Models/hand" + to_string(i) + ".off";
-    // auto s = "../../../Models/dog" + to_string(i) + "_remeshed.off";
-    // auto s = "../../../Models/FAUST_shapes_off/tr_reg_0" + to_string(i) +
-    //          to_string(j) + ".off";
-    //  read_OBJ(s.c_str(), pos, tex, nor, tris, poly_tex, poly_nor, poly_col,
-    //           poly_lab);
+    auto s = "../data_extra/" + name + ".off";
+    //read_OBJ(s.c_str(), pos, tris);
     read_OFF(s.c_str(), pos, tris);
-    // filesystem::path p(s);
-    // string rawname = p.stem();
-    // string str = "_remeshed";
-    // rawname.erase(rawname.find(str), str.length());
     DrawableTrimesh<> m(pos, tris);
+    // optimize position and scale to get better numerical precision
+    m.normalize_bbox();
+    m.center_bbox();        
 
-    MCF(m, 12, 1e-5, true);
+    Eigen::VectorXd K = gaussian_curvature(m);
+    cout << "Total defect orginal " << K.sum()/M_PI << " Pi\n"; 
 
-    auto filename = "../../../Models/CMCF" + name + ".obj";
+    Eigen::VectorXd K_smoothed = K;
+    // for (int i=0;i<100;i++) K_smoothed = Laplacian_smooth_signal(m, K_smoothed, time_step);
+    // cout << "Total defect smoothed iter " << K_smoothed.sum()/M_PI << " Pi\n"; 
+    K_smoothed = Laplacian_smooth_signal(m, K, time_step);
+    cout << "Total defect smoothed single " << K_smoothed.sum()/M_PI << " Pi\n"; 
 
-    write_OBJ(filename.c_str(), obj_wrapper(m.vector_verts()),
-              m.vector_polys());
-    // auto solver = make_geodesic_solver(m);
-    //  auto pc = init_pc(pos);
-    //  patch_fitting(pc, m, 1e-3);
-    //  auto M = geodesic_matrix(solver);
-    //  auto filename = "../geodesic_matrix" + name;
-    //  write_binary_matrix(name.c_str(), M);
+    // write output
+    vector<double> K_vec(K_smoothed.data(),K_smoothed.data()+K_smoothed.size());
+    auto filename = "../data_extra/" + name + "_field.dat";
+    export_field(K_vec,filename);
+
+    // Laplacian_smooth_mesh(m,time_step);
+    // K = gaussian_curvature(m);
+    // cout << "Total defect smoothed mesh " << K.sum()/M_PI << " Pi\n"; 
+    // auto filename = "../data_extra/" + name + "_smoothed_L.obj";
+    // write_OBJ(filename.c_str(),obj_wrapper(m.vector_verts()),m.vector_polys());
   }
 
   return 0;

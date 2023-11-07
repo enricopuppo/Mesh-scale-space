@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.2)
-project(Shape_Matching)
+project(Mesh_scale_space)
 
 add_executable(${PROJECT_NAME} main.cpp diff_geo.h diff_geo.cpp utilities.h utilities.cpp drawing_circle.h drawing_circle.cpp)
 set_target_properties(${PROJECT_NAME}     PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
 include_directories(${CMAKE_SOURCE_DIR}/libs/Eigen)
 include_directories(${CMAKE_SOURCE_DIR}/libs/ann_1.1.2/include)
-set(cinolib_DIR /Users/claudiomancinelli/Documents/GitHub/cinolib)
+set(cinolib_DIR /Users/enricopuppo/Documents/GitHub/lib/cinolib)
 set(CINOLIB_USES_OPENGL_GLFW_IMGUI ON)
 set(CINOLIB_USES_TRIANGLE ON)
 set(CINOLIB_USES_TETGEN ON)
