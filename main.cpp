@@ -12,32 +12,35 @@ using namespace cinolib;
 //::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 //                                 GUI utility
 
-void draw_pc(const point_cloud &pc, GLcanvas &gui) {
-  for (auto &point : pc.points) {
+void draw_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
+  for (auto &point : cp) {
     gui.push(&point, false);
   }
 }
 
-void remove_pc(const point_cloud &pc, GLcanvas &gui) {
-  for (auto &point : pc.points) {
+void remove_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
+  for (auto &point : cp) {
     gui.pop(&point);
   }
 }
 
-bool draw_combobox(const char *lbl, int &value, const vector<string> &labels) {
-  if (!ImGui::BeginCombo(lbl, labels[value].c_str()))
-    return false;
-  auto old_val = value;
-  for (auto i = 0; i < labels.size(); i++) {
-    ImGui::PushID(i);
-    if (ImGui::Selectable(labels[i].c_str(), value == i))
-      value = i;
-    if (value == i)
-      ImGui::SetItemDefaultFocus();
-    ImGui::PopID();
+void set_critical_points(const vector<int> &c, vector<DrawableSphere> &cp, float s)
+{
+  for (uint i=0;i<c.size();i++) {
+    if (c[i]==-1) continue;
+    cp[i].radius = s;
+    if (c[i]==0) cp[i].color = cinolib::Color::BLUE();
+    else if (c[i]==1) cp[i].color = cinolib::Color::RED();
+    else cp[i].color = cinolib::Color::GREEN();
   }
-  ImGui::EndCombo();
-  return value != old_val;
+}
+
+void reset_critical_points(vector<DrawableSphere> &cp)
+{
+  for (auto &point : cp) {
+    point.radius = 0.0;
+    point.color = cinolib::Color::BLACK();
+  }
 }
 
 //=========================== PROCESSING FUNCTIONS PROTOTYPES ==================
@@ -89,24 +92,6 @@ void print_statistics(const vector<vector<int>> &c)
   }
 }
 
-void set_critical_points(const vector<int> &c, vector<DrawableSphere> &p)
-{
-  for (auto i=0;i<c.size();i++) {
-    if (c[i]==-1) continue;
-    p[i].radius = 0.5;
-    if (c[i]==0) p[i].color = cinolib::Color::BLUE();
-    else if (c[i]==1) p[i].color = cinolib::Color::RED();
-    else p[i].color = cinolib::Color::GREEN();
-  }
-}
-
-void reset_critical_points(vector<DrawableSphere> &p)
-{
-  for (auto i=0;i<p.size();i++) {
-    p[i].radius = 0.0;
-    p[i].color = cinolib::Color::BLACK();
-  }
-}
 
 //=============================== INPUT FIELD ==================================
 Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
@@ -120,7 +105,7 @@ Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
   // return gaussian_curvature(m);
 }
 
-void Clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]) 
+void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]) 
 {
   // set clamp limits to sigma_multiplier * sigma
   double mean = f.sum()/f.size();
@@ -163,9 +148,11 @@ int main(int argc, char **argv) {
   vector<vector<double>> fields(nlevels,vector<double>(nverts));
 
   // GENERATE FIELD
+  // MCF(m,1,0.0);
   Eigen::VectorXd f = Generate_field(m);
+  // f *= 100000000;
   float clamp_limits[2];
-  Clamp_limits(f, 1, clamp_limits); // set clamp limits to sigma
+  Set_clamp_limits(f, 1, clamp_limits); // set clamp limits to sigma
 
   // COMPUTE
   cout << "Computing discrete scale space: " << flush;
@@ -179,26 +166,28 @@ int main(int argc, char **argv) {
 
   cout << "Finding critical points: " << flush;
   vector<vector<int>> critical(nlevels,vector<int>(nverts));
-  for (auto i=0;i<efields.size();i++) 
+  for (auto i=0;i<efields.size();i++) {
+    cout << "Level " << i << ": ";
     critical[i] = Find_Critical_Points(m,efields[i]);
+    cout << endl;
+  }
   cout << endl;
   print_statistics(critical);
 
   // GUI
   GLcanvas gui;
   ScalarField phi;
-  float point_size = 0.002;
   int selected_entry = 0;
   bool show_sf = false;
   bool show_cp = false;
-
-  vector<DrawableSphere> points(nverts);
-  for (auto i = 0; i < points.size(); ++i) {
-    points[i]=DrawableSphere(m.vert(i),0.0,cinolib::Color::BLACK());
-    gui.push(&(points[i]));
-  }
- 
   gui.show_side_bar = true;
+
+  // bullets for critical points
+  float point_size = m.edge_avg_length()/2;
+  vector<DrawableSphere> points(nverts);
+  for (uint i=0;i<nverts;i++)
+    points[i]=DrawableSphere(m.vert(i),0.0,cinolib::Color::BLACK());
+ 
   gui.push(&m);
  
   gui.callback_app_controls = [&]() {
@@ -214,9 +203,13 @@ int main(int argc, char **argv) {
     } 
     ImGui::SameLine();
     if (ImGui::Checkbox("Show Critical Points", &show_cp)) {
-      if (show_cp)
-        set_critical_points(critical[selected_entry],points);
-      else reset_critical_points(points);
+      if (show_cp) {
+        set_critical_points(critical[selected_entry],points,point_size);
+        draw_cp(points,gui);
+      } else {
+        reset_critical_points(points);
+        remove_cp(points,gui);
+      }
       m.updateGL();
     } 
     // if (ImGui::Button("Dummy button 2")) {
@@ -238,24 +231,27 @@ int main(int argc, char **argv) {
       }
       if (show_cp) {
         reset_critical_points(points);
-        set_critical_points(critical[selected_entry],points);
+        set_critical_points(critical[selected_entry],points,point_size);
       }
       if (show_sf || show_cp) m.updateGL();
     }
   };
 
-  // gui.callback_mouse_left_click = [&](int modifiers) -> bool {
-  //   if (modifiers & GLFW_MOD_SHIFT) {
-  //     vec3d p;
-  //     vec2d click = gui.cursor_pos();
-  //     if (gui.unproject(click, p)) {
-  //       uint vid = m.pick_vert(p);
-  //       m.vert_data(vid).color = Color::RED();
-  //       m.updateGL();
-  //     }
-  //   }
-  //   return false;
-  // };
+  gui.callback_mouse_left_click = [&](int modifiers) -> bool {
+    if (modifiers & GLFW_MOD_SHIFT) {
+      vec3d p;
+      vec2d click = gui.cursor_pos();
+      if (gui.unproject(click, p)) {
+        uint vid = m.pick_vert(p);
+        cout << "Picked vertex " << vid << " field value " 
+              << std::setprecision(15) << fields[selected_entry][vid] 
+              << " at level " << selected_entry << endl;
+        // m.vert_data(vid).color = Color::RED();
+        // m.updateGL();
+      }
+    }
+    return false;
+  };
 
   return gui.launch();
 }
@@ -280,10 +276,8 @@ double compute_theta(const DrawableTrimesh<> &m, const int tid, const int vid) {
 double gaussian_curvature(const DrawableTrimesh<> &m,const int vid) {
   double result = 0.;
   vector<uint> star = m.adj_v2p(vid);
-
   for (uint tid : star)
     result += compute_theta(m, tid, vid);
-
   return 2 * M_PI - result;
 }
 
@@ -307,20 +301,22 @@ Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen
     return x;
 }
 
-vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m1, const Eigen::VectorXd &f, 
                                                                     double time_scalar, const int levels) 
 {
-    Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
-    Eigen::SparseMatrix<double> MM = mass_matrix(m);
-    vector<Eigen::VectorXd> buf;
-    buf.push_back(f);
-    for (auto i=1;i<levels;i++) {
-      // backward euler time integration of heat flow equation
-      Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-      buf.push_back(LLT.solve(MM * f));
-      time_scalar *= 2;
-    }
-    return buf;
+  DrawableTrimesh<> m(m1);
+  // MCF(m,1);
+  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+  Eigen::SparseMatrix<double> MM = mass_matrix(m);
+  vector<Eigen::VectorXd> buf;
+  buf.push_back(f);
+  for (auto i=1;i<levels;i++) {
+    // backward euler time integration of heat flow equation
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
+    buf.push_back(LLT.solve(MM * f));
+    time_scalar *= 2;
+  }
+  return buf;
 }
 
 void Laplacian_smooth_mesh(DrawableTrimesh<> & m, const double time_scalar)
@@ -385,7 +381,8 @@ vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const Eigen::Vector
     int nn = neigh.size();
     vector<bool> sign(nn);    // true iff neighbor is smaller
     for (uint j=0;j<nn;j++) { // cycle on neighbors
-      if (f(neigh[j])==f(vid)) sign[j] = (vid>neigh[j]); // solve ties with vertex index
+      if (f(neigh[j])==f(vid)) {sign[j] = (vid>neigh[j]); 
+      cout << "Tie: " << vid << ", " << neigh[j] << ", "; } // solve ties with vertex index
       else if (f(neigh[j])<f(vid)) sign[j] = true;
       else sign[j] = false;
     }
