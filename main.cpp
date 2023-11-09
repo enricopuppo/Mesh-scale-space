@@ -62,7 +62,7 @@ void Laplacian_smooth_mesh(DrawableTrimesh<> &, const double);
 
 Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> &, const Eigen::SparseMatrix<double> &);
 
-vector<int> Find_Critical_Points(const DrawableTrimesh<> &, const Eigen::VectorXd &);
+vector<int> Find_Critical_Points(const DrawableTrimesh<> &, const Eigen::VectorXd &, vector<vector<int>> &);
 
 //====================== UTILITIES =============================================
 
@@ -101,7 +101,7 @@ void print_statistics(const vector<vector<int>> &c)
 
 void normalize_in_01(Eigen::VectorXd &f)
 {
-    long double min =  f.minCoeff();
+    long double min = f.minCoeff();
     long double max = f.maxCoeff();
     long double delta = max - min;
     for(int i=0;i<f.size();i++) {
@@ -136,7 +136,7 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
   // cl[1] = mean + sigma_multiplier * sigma;
   cl[0] = std::max(mean - sigma_multiplier * sigma,0.0);
   cl[1] = std::min(mean + sigma_multiplier * sigma,1.0);
-  cout << "clamp limits: " << cl[0] << ", " << cl[1] << endl;
+  // cout << "clamp limits: " << cl[0] << ", " << cl[1] << endl;
 }
 
 //=============================== MAIN =========================================
@@ -151,20 +151,20 @@ int main(int argc, char **argv) {
   uint nverts = m.num_verts();
   // m.normalize_bbox();
   // m.center_bbox();   
-   
+  // MCF(m,1,0.0001);
+ 
   // OUTPUT FIELDS
   uint nlevels = stoi(argv[2]); 
   vector<vector<double>> fields(nlevels,vector<double>(nverts));
 
   // GENERATE FIELD
-  // MCF(m,1,0.0);
   Eigen::VectorXd f = Generate_field(m);
   // f *= 100000000;
   vector<float*> clamp_limits(nlevels);
   for (auto &l : clamp_limits) l = new float[2];
 
   // COMPUTE
-  cout << "Computing discrete scale space: " << flush;
+  cout << "Computing discrete scale space: \n";
   double time_step = stod(argv[3]);
   double time_mult = stod(argv[4]);
   vector<Eigen::VectorXd> efields = Build_discrete_scale_space(m,f,time_step,time_mult,nlevels);
@@ -176,14 +176,20 @@ int main(int argc, char **argv) {
   for (auto i=0;i<nlevels;i++) 
     Set_clamp_limits(efields[i], 2, clamp_limits[i]); // set clamp limits to sigma
 
-  cout << "Finding critical points: " << flush;
+  cout << "Finding critical points: \n";
   vector<vector<int>> critical(nlevels,vector<int>(nverts));
+  vector<vector<int>> ties;
   for (auto i=0;i<efields.size();i++) {
-    cout << "Level " << i << ": ";
-    critical[i] = Find_Critical_Points(m,efields[i]);
-    cout << endl;
+    critical[i] = Find_Critical_Points(m,efields[i],ties);
+    if (ties.size()>0) {
+      cout << "Found ties at level " << i << ": ";
+      for (auto i=0;i<ties.size();i++) 
+        cout << "(" << ties[i][0] << "," << ties[i][1] << "), ";
+      cout << endl;
+    }
+    ties.resize(0);
   }
-  cout << endl;
+  cout << "done"<< endl;
   print_statistics(critical);
 
   // GUI
@@ -325,23 +331,22 @@ Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen
     return x;
 }
 
-vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m1, const Eigen::VectorXd &f, 
-                                                  double time_scalar, double time_multiplier, int levels) 
+vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+                                                    double time_scalar, double time_multiplier, int levels) 
 {
-  DrawableTrimesh<> m(m1);
+  // DrawableTrimesh<> m(m1);
   // MCF(m,1);
   Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
   Eigen::SparseMatrix<double> MM = mass_matrix(m);
-  vector<Eigen::VectorXd> buf;
-  Eigen::VectorXd sf(f);
-  normalize_in_01(sf);
-  buf.push_back(sf);
+  vector<Eigen::VectorXd> buf(levels);
+  buf[0]=f;
+  normalize_in_01(buf[0]);
   for (auto i=1;i<levels;i++) {
-    // backward euler time integration of heat flow equation
+    if (i%10==0) cout << "level "<< i << " completed\n";
+    // backward Euler time integration of heat flow equation
     Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-    sf = LLT.solve(MM * buf[i-1]);
-    normalize_in_01(sf);
-    buf.push_back(sf);
+    buf[i] = LLT.solve(MM * buf[i-1]);
+    normalize_in_01(buf[i]);
     time_scalar *= time_multiplier;
   }
   return buf;
@@ -399,7 +404,7 @@ Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m, const Eigen::SparseM
   return H;
 }
 
-vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const Eigen::VectorXd &f)
+vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, vector<vector<int>> &ties)
 {
   // -1 regular; 0 minimum; 1 maximum; k>1 (k-1)-saddle
   vector<int> buf(f.size());
@@ -409,8 +414,12 @@ vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const Eigen::Vector
     int nn = neigh.size();
     vector<bool> sign(nn);    // true iff neighbor is smaller
     for (uint j=0;j<nn;j++) { // cycle on neighbors
-      if (f(neigh[j])==f(vid)) {sign[j] = (vid>neigh[j]); 
-      cout << "Tie: " << vid << ", " << neigh[j] << ", "; } // solve ties with vertex index
+      if (f(neigh[j])==f(vid)) { // solve ties with vertex index
+        sign[j] = (vid>neigh[j]); 
+        vector<int> t(2);
+        t[0]=vid; t[1]=neigh[j];
+        ties.push_back(t);
+      }
       else if (f(neigh[j])<f(vid)) sign[j] = true;
       else sign[j] = false;
     }
