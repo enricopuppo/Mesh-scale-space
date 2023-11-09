@@ -12,19 +12,16 @@ using namespace cinolib;
 //::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 //                                 GUI utility
 
-void draw_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
-  for (auto &point : cp) {
-    gui.push(&point, false);
-  }
+inline void draw_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
+  for (auto &point : cp) //if (point.radius > 0) 
+  gui.push(&point, false);
 }
 
-void remove_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
-  for (auto &point : cp) {
-    gui.pop(&point);
-  }
+inline void remove_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
+  for (auto &point : cp) gui.pop(&point);
 }
 
-void set_critical_points(const vector<int> &c, vector<DrawableSphere> &cp, float s)
+inline void set_critical_points(const vector<int> &c, vector<DrawableSphere> &cp, float s)
 {
   for (uint i=0;i<c.size();i++) {
     if (c[i]==-1) continue;
@@ -35,7 +32,7 @@ void set_critical_points(const vector<int> &c, vector<DrawableSphere> &cp, float
   }
 }
 
-void reset_critical_points(vector<DrawableSphere> &cp)
+inline void reset_critical_points(vector<DrawableSphere> &cp)
 {
   for (auto &point : cp) {
     point.radius = 0.0;
@@ -43,11 +40,23 @@ void reset_critical_points(vector<DrawableSphere> &cp)
   }
 }
 
+ScalarField Clamp_and_rescale_field(const vector<double> &f, const float cl[])
+{ // input field is in [0,1]
+  ScalarField sf(f);
+  // cout << "Actual range [" << sf.minCoeff() << "," << sf.maxCoeff() << "] clapmed to [" << cl[0] << "," << cl[1] << "] ";
+  for (auto i=0;i<sf.size();i++) 
+    if (sf(i)<cl[0]) sf(i) = 0.0;
+    else if (sf(i) > cl[1]) sf(i) = 1.0;
+    else sf(i) = (sf(i)-cl[0])/(cl[1]-cl[0]);
+  // cout << "rescaled in [" << sf.minCoeff() << "," << sf.maxCoeff() << "]\n";
+  return sf;
+}
+
 //=========================== PROCESSING FUNCTIONS PROTOTYPES ==================
 
 Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &);
-vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &, const Eigen::VectorXd &, 
-                                                                                        double, const int);
+vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &, const Eigen::VectorXd &,   
+                                                                              double, double, const int);
 Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> &, const Eigen::VectorXd &, const double);
 void Laplacian_smooth_mesh(DrawableTrimesh<> &, const double);
 
@@ -75,8 +84,6 @@ void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
   }
 }
 
-void progress_log(uint i) { std::cout <<  i << " "; std::cout.flush(); }
-
 void print_statistics(const vector<vector<int>> &c)
 {
   for (uint i=0;i<c.size();i++) {
@@ -92,6 +99,16 @@ void print_statistics(const vector<vector<int>> &c)
   }
 }
 
+void normalize_in_01(Eigen::VectorXd &f)
+{
+    long double min =  f.minCoeff();
+    long double max = f.maxCoeff();
+    long double delta = max - min;
+    for(int i=0;i<f.size();i++) {
+        f[i] = (double)((f[i]-min) / delta);
+    }
+}
+
 
 //=============================== INPUT FIELD ==================================
 Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
@@ -99,10 +116,13 @@ Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
   // field is mean curvature 
   Eigen::SparseMatrix<double> ML  = laplacian(m, COTANGENT);
   Eigen::SparseMatrix<double> MM = mass_matrix(m);
+  Eigen::VectorXd buf;
   InvertSparseMatrix(MM);
   ML = MM * ML;
-  return Mean_curvature(m,ML);
-  // return gaussian_curvature(m);
+  buf = Mean_curvature(m,ML);
+  // buf = gaussian_curvature(m);
+  normalize_in_01(buf);
+  return buf;
 }
 
 void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]) 
@@ -112,22 +132,11 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
   Eigen::VectorXd s(f);
   for (auto i=0;i<s.size();i++) s(i) = (s(i)-mean)*(s(i)-mean);
   double sigma = sqrt(s.sum()/s.size());
-  cl[0] = mean - sigma_multiplier * sigma;
-  cl[1] = mean + sigma_multiplier * sigma;
-  cout << "Field limits: " << f.minCoeff() << ", " << f.maxCoeff() 
-      << "; clamp limits: " << cl[0] << ", " << cl[1] << endl;
-}
-
-ScalarField Rescale_field(const vector<double> & f, float cl[])
-{
-  ScalarField sf(f);
-  cout << "Actual range [" << sf.minCoeff() << "," << sf.maxCoeff() << "] clapmed to [" << cl[0] << "," << cl[1] << "] ";
-  for (auto i=0;i<sf.size();i++) 
-    if (sf(i)<cl[0]) sf(i) = 0.0;
-    else if (sf(i) > cl[1]) sf(i) = 1.0;
-    else sf(i) = (sf(i)-cl[0])/(cl[1]-cl[0]);
-  cout << "rescaled in [" << sf.minCoeff() << "," << sf.maxCoeff() << "]\n";
-  return sf;
+  // cl[0] = mean - sigma_multiplier * sigma;
+  // cl[1] = mean + sigma_multiplier * sigma;
+  cl[0] = std::max(mean - sigma_multiplier * sigma,0.0);
+  cl[1] = std::min(mean + sigma_multiplier * sigma,1.0);
+  cout << "clamp limits: " << cl[0] << ", " << cl[1] << endl;
 }
 
 //=============================== MAIN =========================================
@@ -151,18 +160,21 @@ int main(int argc, char **argv) {
   // MCF(m,1,0.0);
   Eigen::VectorXd f = Generate_field(m);
   // f *= 100000000;
-  float clamp_limits[2];
-  Set_clamp_limits(f, 1, clamp_limits); // set clamp limits to sigma
+  vector<float*> clamp_limits(nlevels);
+  for (auto &l : clamp_limits) l = new float[2];
 
   // COMPUTE
   cout << "Computing discrete scale space: " << flush;
   double time_step = stod(argv[3]);
-  vector<Eigen::VectorXd> efields = Build_discrete_scale_space(m,f,time_step,nlevels);
+  double time_mult = stod(argv[4]);
+  vector<Eigen::VectorXd> efields = Build_discrete_scale_space(m,f,time_step,time_mult,nlevels);
   for (auto i=0;i<efields.size();i++) {
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
-    // progress_log(i);
   }
-  cout << endl;
+  cout << "done"<< endl;
+
+  for (auto i=0;i<nlevels;i++) 
+    Set_clamp_limits(efields[i], 2, clamp_limits[i]); // set clamp limits to sigma
 
   cout << "Finding critical points: " << flush;
   vector<vector<int>> critical(nlevels,vector<int>(nverts));
@@ -178,8 +190,10 @@ int main(int argc, char **argv) {
   GLcanvas gui;
   ScalarField phi;
   int selected_entry = 0;
+  float curr_clamp[2];
   bool show_sf = false;
   bool show_cp = false;
+  bool show_wf = false;
   gui.show_side_bar = true;
 
   // bullets for critical points
@@ -189,11 +203,19 @@ int main(int argc, char **argv) {
     points[i]=DrawableSphere(m.vert(i),0.0,cinolib::Color::BLACK());
  
   gui.push(&m);
+  m.show_wireframe(false);
  
   gui.callback_app_controls = [&]() {
+    if (ImGui::Checkbox("Show wireframe", &show_wf)) {
+      if (show_wf) m.show_wireframe(true);
+      else m.show_wireframe(false);
+      m.updateGL();
+    } 
     if (ImGui::Checkbox("Show Scalar Field", &show_sf)) {
       if (show_sf) {
-        phi = Rescale_field(fields[selected_entry],clamp_limits);
+        curr_clamp[0]=clamp_limits[selected_entry][0];
+        curr_clamp[1]=clamp_limits[selected_entry][1];
+        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
         // phi.normalize_in_01();
         phi.copy_to_mesh(m);
         m.show_texture1D(TEXTURE_1D_HSV);
@@ -217,16 +239,18 @@ int main(int argc, char **argv) {
     //   write_OBJ(name0.c_str(), obj_wrapper(m.vector_verts()),
     //             m.vector_polys());
     // }
-    if (ImGui::SliderFloat2("Clamp values", clamp_limits, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
+    if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
       if (show_sf) {
-        phi = Rescale_field(fields[selected_entry],clamp_limits);
+        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
         phi.copy_to_mesh(m);
         m.updateGL();
       }
     }
     if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
       if (show_sf) {
-        phi = Rescale_field(fields[selected_entry],clamp_limits);
+        curr_clamp[0]=clamp_limits[selected_entry][0];
+        curr_clamp[1]=clamp_limits[selected_entry][1];
+        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
         phi.copy_to_mesh(m);
       }
       if (show_cp) {
@@ -244,7 +268,7 @@ int main(int argc, char **argv) {
       if (gui.unproject(click, p)) {
         uint vid = m.pick_vert(p);
         cout << "Picked vertex " << vid << " field value " 
-              << std::setprecision(15) << fields[selected_entry][vid] 
+              << std::setprecision(20) << fields[selected_entry][vid] 
               << " at level " << selected_entry << endl;
         // m.vert_data(vid).color = Color::RED();
         // m.updateGL();
@@ -289,7 +313,7 @@ Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &m) {
 }
 
 Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen::VectorXd & f,
-         const double                   time_scalar)
+                                        double time_scalar)
 {
     Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
     Eigen::SparseMatrix<double> MM = mass_matrix(m);
@@ -302,19 +326,23 @@ Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen
 }
 
 vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m1, const Eigen::VectorXd &f, 
-                                                                    double time_scalar, const int levels) 
+                                                  double time_scalar, double time_multiplier, int levels) 
 {
   DrawableTrimesh<> m(m1);
   // MCF(m,1);
   Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
   Eigen::SparseMatrix<double> MM = mass_matrix(m);
   vector<Eigen::VectorXd> buf;
-  buf.push_back(f);
+  Eigen::VectorXd sf(f);
+  normalize_in_01(sf);
+  buf.push_back(sf);
   for (auto i=1;i<levels;i++) {
     // backward euler time integration of heat flow equation
     Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-    buf.push_back(LLT.solve(MM * f));
-    time_scalar *= 2;
+    sf = LLT.solve(MM * buf[i-1]);
+    normalize_in_01(sf);
+    buf.push_back(sf);
+    time_scalar *= time_multiplier;
   }
   return buf;
 }
