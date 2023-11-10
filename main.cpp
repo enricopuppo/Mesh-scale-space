@@ -8,9 +8,8 @@
 #include <fstream>
 using namespace std;
 using namespace cinolib;
-// NOTES: 71 does not get the correspondence right on one hand
-//::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-//                                 GUI utility
+
+//::::::::::::::::::::::::::::::::::::GUI utilitIES ::::::::::::::::::::::::::::::::::::
 
 inline void draw_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
   for (auto &point : cp) //if (point.radius > 0) 
@@ -41,7 +40,9 @@ inline void reset_critical_points(vector<DrawableSphere> &cp)
 }
 
 ScalarField Clamp_and_rescale_field(const vector<double> &f, const float cl[])
-{ // input field is in [0,1]
+// f field is in [0,1] both in input and in output
+// cl clamp limits: clamp f in [cl[0],cl[1]] and rescale it to [0,1]
+{ 
   ScalarField sf(f);
   // cout << "Actual range [" << sf.minCoeff() << "," << sf.maxCoeff() << "] clapmed to [" << cl[0] << "," << cl[1] << "] ";
   for (auto i=0;i<sf.size();i++) 
@@ -52,30 +53,13 @@ ScalarField Clamp_and_rescale_field(const vector<double> &f, const float cl[])
   return sf;
 }
 
-//=========================== PROCESSING FUNCTIONS PROTOTYPES ==================
-
-Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &);
-vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &, const Eigen::VectorXd &,   
-                                                                              double, double, const int);
-Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> &, const Eigen::VectorXd &, const double);
-void Laplacian_smooth_mesh(DrawableTrimesh<> &, const double);
-
-Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> &, const Eigen::SparseMatrix<double> &);
-
-vector<int> Find_Critical_Points(const DrawableTrimesh<> &, const Eigen::VectorXd &, vector<vector<int>> &);
-
-//====================== UTILITIES =============================================
+//====================== GENERAL UTILITIES =============================================
 
 void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
 {
-    // Iterate over outside
-  for(int k=0; k<Y.outerSize(); ++k)
-  {
-    // Iterate over inside
-    for(typename Eigen::SparseMatrix<double>::InnerIterator it(Y,k); it; ++it)
-    {
-      if (it.col() == it.row())
-      {
+  for(int k=0; k<Y.outerSize(); ++k) {
+    for(typename Eigen::SparseMatrix<double>::InnerIterator it(Y,k); it; ++it) {
+      if (it.col() == it.row()) {
         double v = it.value();
         v = 1.0/v;
         Y.coeffRef(it.row(),it.col()) = v;
@@ -84,31 +68,65 @@ void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
   }
 }
 
-void print_statistics(const vector<vector<int>> &c)
-{
-  for (uint i=0;i<c.size();i++) {
-    cout << "Field " << i << ": ";
-    std::vector<int>::iterator cit;
-    int k = *std::max_element(c[i].begin(),c[i].end());
-    vector<int> counts(k+1,0);
-    for (uint vid=0;vid<c[i].size();vid++)
-      if (c[i][vid]!=-1) counts[c[i][vid]]++;
-    cout << counts[0] << " minima, " << counts[1] << " maxima, ";
-    for (uint j=2; j<=k; j++) cout << counts[j] << " " << j-1 << "-saddles ";
-    cout << endl;
-  }
-}
-
 void normalize_in_01(Eigen::VectorXd &f)
 {
     long double min = f.minCoeff();
     long double max = f.maxCoeff();
     long double delta = max - min;
-    for(int i=0;i<f.size();i++) {
-        f[i] = (double)((f[i]-min) / delta);
-    }
+    for(int i=0;i<f.size();i++) f[i] = (double)((f[i]-min) / delta);
 }
 
+//==================== FIELD GENERATORS ========================
+
+double compute_theta(const DrawableTrimesh<> &m, const int tid, const int vid) {
+  uint k = m.poly_vert_offset(tid, vid);
+  uint vid1 = m.poly_vert_id(tid, (k + 1) % 3);
+  uint vid2 = m.poly_vert_id(tid, (k + 2) % 3);
+
+  vec3d v1 = m.vert(vid1)-m.vert(vid);
+  vec3d v2 = m.vert(vid2)-m.vert(vid);
+
+  double theta = v1.angle_rad(v2);
+
+  return theta;
+}
+
+double gaussian_curvature(const DrawableTrimesh<> &m, const int vid) {
+  double result = 0.;
+  vector<uint> star = m.adj_v2p(vid);
+  for (uint tid : star)
+    result += compute_theta(m, tid, vid);
+  return 2 * M_PI - result;
+}
+
+Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &m) {
+  Eigen::VectorXd result(m.num_verts());
+  for (uint i = 0; i < m.num_verts(); ++i)
+    result(i) = gaussian_curvature(m, i);
+  return result;
+}
+
+Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m, const Eigen::SparseMatrix<double> &ML)
+{
+  uint nv = m.num_verts();
+  Eigen::MatrixXd V(nv,3);
+  for(uint vid=0; vid<nv; ++vid) {
+      vec3d pos = m.vert(vid);
+      V(vid,0) = pos.x();
+      V(vid,1) = pos.y();
+      V(vid,2) = pos.z();
+  }
+  Eigen::MatrixXd Hn = ML * V;
+  Hn *= -0.5;
+  Eigen::VectorXd H(nv);
+  for(uint vid=0; vid<nv; ++vid) {
+    H(vid)=Hn.row(vid).norm();
+    vec3d Hni(Hn(vid,0),Hn(vid,1),Hn(vid,2));
+    vec3d n = m.vert_data(vid).normal;      //vert_data(vid).normal;
+    if (Hni.dot(n)<0) H(vid) = -H(vid); 
+  }
+  return H;
+}
 
 //=============================== INPUT FIELD ==================================
 Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
@@ -139,6 +157,78 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
   // cout << "clamp limits: " << cl[0] << ", " << cl[1] << endl;
 }
 
+//=========================== PROCESSING FUNCTIONS =============================
+
+vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+                                                    double time_scalar, double time_multiplier, int levels) 
+{
+  // DrawableTrimesh<> m(m1);
+  // MCF(m,1);
+  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+  Eigen::SparseMatrix<double> MM = mass_matrix(m);
+  vector<Eigen::VectorXd> buf(levels);
+  buf[0]=f;
+  normalize_in_01(buf[0]);
+  for (auto i=1;i<levels;i++) {
+    if (i%10==0) cout << "level "<< i << " completed\n";
+    // backward Euler time integration of heat flow equation
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
+    buf[i] = LLT.solve(MM * buf[i-1]);
+    normalize_in_01(buf[i]);
+    time_scalar *= time_multiplier;
+  }
+  return buf;
+}
+
+vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const vector<vector<uint>> &VV,
+                                          const Eigen::VectorXd &f, vector<vector<int>> &ties)
+{
+  // -1 regular; 0 minimum; 1 maximum; k>1 (k-1)-saddle
+  vector<int> buf(f.size());
+  uint nv = m.num_verts();
+  for(uint vid=0; vid<nv; vid++) {
+    vector<uint> neigh = VV[vid];
+    int nn = neigh.size();
+    vector<bool> sign(nn);    // true iff neighbor is smaller
+    for (uint j=0;j<nn;j++) { // cycle on neighbors
+      if (f(neigh[j])==f(vid)) { // solve ties with vertex index
+        sign[j] = (vid>neigh[j]); 
+        vector<int> t(2);
+        t[0]=vid; t[1]=neigh[j];
+        ties.push_back(t);
+      }
+      else if (f(neigh[j])<f(vid)) sign[j] = true;
+      else sign[j] = false;
+    }
+    uint count = 0;
+    for (uint j=0; j<nn; j++)
+      if (sign[j]!=sign[(j+1)%nn]) count++;
+    if (count==0) buf[vid] = sign[0]?1:0;       // max or min depending on sign
+    else if (count==2) buf[vid] = -1;           // regular
+    else if (count%2 == 0) buf[vid] = count/2;  // k-saddle
+    else cout << "Error at vertex " << vid << ": odd number of change sign\n";
+  }
+  return buf;
+}
+
+void print_statistics(const vector<vector<int>> &c)
+{
+  for (uint i=0;i<c.size();i++) {
+    cout << "Field " << i << ": ";
+    std::vector<int>::iterator cit;
+    int k = *std::max_element(c[i].begin(),c[i].end());
+    vector<int> counts(k+1,0);
+    for (uint vid=0;vid<c[i].size();vid++)
+      if (c[i][vid]!=-1) counts[c[i][vid]]++;
+    cout << counts[0] << " minima, " << counts[1] << " maxima, ";
+    for (uint j=2; j<=k; j++) cout << counts[j] << " " << j-1 << "-saddles ";
+    cout << endl;
+  }
+}
+
+
+
+
 //=============================== MAIN =========================================
 
 int main(int argc, char **argv) {
@@ -149,6 +239,8 @@ int main(int argc, char **argv) {
   auto s = "../data/" + name;
   DrawableTrimesh<> m(s.c_str());
   uint nverts = m.num_verts();
+  vector<vector<uint>> VV(nverts); // Vertex-Vertex relation
+  for (auto i=0;i<nverts;i++) VV[i]=m.vert_ordered_verts_link(i);
   // m.normalize_bbox();
   // m.center_bbox();   
   // MCF(m,1,0.0001);
@@ -180,7 +272,7 @@ int main(int argc, char **argv) {
   vector<vector<int>> critical(nlevels,vector<int>(nverts));
   vector<vector<int>> ties;
   for (auto i=0;i<efields.size();i++) {
-    critical[i] = Find_Critical_Points(m,efields[i],ties);
+    critical[i] = Find_Critical_Points(m,VV,efields[i],ties);
     if (ties.size()>0) {
       cout << "Found ties at level " << i << ": ";
       for (auto i=0;i<ties.size();i++) 
@@ -285,38 +377,7 @@ int main(int argc, char **argv) {
 
   return gui.launch();
 }
-
-//===================================== PROCESSING FUNCTIONS ===================================
-
-//::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-
-double compute_theta(const DrawableTrimesh<> &m, const int tid, const int vid) {
-  uint k = m.poly_vert_offset(tid, vid);
-  uint vid1 = m.poly_vert_id(tid, (k + 1) % 3);
-  uint vid2 = m.poly_vert_id(tid, (k + 2) % 3);
-
-  vec3d v1 = m.vert(vid1)-m.vert(vid);
-  vec3d v2 = m.vert(vid2)-m.vert(vid);
-
-  double theta = v1.angle_rad(v2);
-
-  return theta;
-}
-
-double gaussian_curvature(const DrawableTrimesh<> &m,const int vid) {
-  double result = 0.;
-  vector<uint> star = m.adj_v2p(vid);
-  for (uint tid : star)
-    result += compute_theta(m, tid, vid);
-  return 2 * M_PI - result;
-}
-
-Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &m) {
-  Eigen::VectorXd result(m.num_verts());
-  for (uint i = 0; i < m.num_verts(); ++i)
-    result(i) = gaussian_curvature(m, i);
-  return result;
-}
+//=========================== UNUSED FUNCTIONS =======================
 
 Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen::VectorXd & f,
                                         double time_scalar)
@@ -329,27 +390,6 @@ Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen
     // return LLT.solve(MM * f);
     Eigen::VectorXd x = LLT.solve(MM * f);
     return x;
-}
-
-vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
-                                                    double time_scalar, double time_multiplier, int levels) 
-{
-  // DrawableTrimesh<> m(m1);
-  // MCF(m,1);
-  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
-  Eigen::SparseMatrix<double> MM = mass_matrix(m);
-  vector<Eigen::VectorXd> buf(levels);
-  buf[0]=f;
-  normalize_in_01(buf[0]);
-  for (auto i=1;i<levels;i++) {
-    if (i%10==0) cout << "level "<< i << " completed\n";
-    // backward Euler time integration of heat flow equation
-    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-    buf[i] = LLT.solve(MM * buf[i-1]);
-    normalize_in_01(buf[i]);
-    time_scalar *= time_multiplier;
-  }
-  return buf;
 }
 
 void Laplacian_smooth_mesh(DrawableTrimesh<> & m, const double time_scalar)
@@ -382,56 +422,6 @@ void Laplacian_smooth_mesh(DrawableTrimesh<> & m, const double time_scalar)
     }
 }
 
-Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m, const Eigen::SparseMatrix<double> &ML)
-{
-  uint nv = m.num_verts();
-  Eigen::MatrixXd V(nv,3);
-  for(uint vid=0; vid<nv; ++vid) {
-      vec3d pos = m.vert(vid);
-      V(vid,0) = pos.x();
-      V(vid,1) = pos.y();
-      V(vid,2) = pos.z();
-  }
-  Eigen::MatrixXd Hn = ML * V;
-  Hn *= -0.5;
-  Eigen::VectorXd H(nv);
-  for(uint vid=0; vid<nv; ++vid) {
-    H(vid)=Hn.row(vid).norm();
-    vec3d Hni(Hn(vid,0),Hn(vid,1),Hn(vid,2));
-    vec3d n = m.vert_data(vid).normal;      //vert_data(vid).normal;
-    if (Hni.dot(n)<0) H(vid) = -H(vid); 
-  }
-  return H;
-}
 
-vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, vector<vector<int>> &ties)
-{
-  // -1 regular; 0 minimum; 1 maximum; k>1 (k-1)-saddle
-  vector<int> buf(f.size());
-  uint nv = m.num_verts();
-  for(uint vid=0; vid<nv; vid++) {
-    vector<uint> neigh = m.vert_ordered_verts_link(vid);
-    int nn = neigh.size();
-    vector<bool> sign(nn);    // true iff neighbor is smaller
-    for (uint j=0;j<nn;j++) { // cycle on neighbors
-      if (f(neigh[j])==f(vid)) { // solve ties with vertex index
-        sign[j] = (vid>neigh[j]); 
-        vector<int> t(2);
-        t[0]=vid; t[1]=neigh[j];
-        ties.push_back(t);
-      }
-      else if (f(neigh[j])<f(vid)) sign[j] = true;
-      else sign[j] = false;
-    }
-    uint count = 0;
-    for (uint j=0; j<nn; j++)
-      if (sign[j]!=sign[(j+1)%nn]) count++;
-    if (count==0) buf[vid] = sign[0]?1:0;       // max or min depending on sign
-    else if (count==2) buf[vid] = -1;           // regular
-    else if (count%2 == 0) buf[vid] = count/2;  // k-saddle
-    else cout << "Error at vertex " << vid << ": odd number of change sign\n";
-  }
-  return buf;
-}
 
 
