@@ -377,6 +377,7 @@ int main(int argc, char **argv) {
 
   // bullets for rendering critical points
   float point_size = m.edge_avg_length()/2;
+  float point_multiplier = 1.0;
   vector<DrawableSphere> points(nverts);
   for (uint i=0;i<nverts;i++)
     points[i]=DrawableSphere(m.vert(i),0.0,cinolib::Color::BLACK());
@@ -413,7 +414,7 @@ int main(int argc, char **argv) {
     ImGui::SameLine();
     if (ImGui::Checkbox("Show Critical Points", &show_cp)) {
       if (show_cp) {
-        set_points(critical[selected_entry],points,point_size);
+        set_points(critical[selected_entry],points,point_size*point_multiplier);
         draw_points(points,gui);
       } else {
         reset_points(points);
@@ -421,6 +422,12 @@ int main(int argc, char **argv) {
       }
       m.updateGL();
     } 
+    if (ImGui::SliderFloat("Point size", &point_multiplier, 0, 10.0, "%.1f")) {
+      if (show_cp) {
+        set_points(critical[selected_entry],points,point_size*point_multiplier);
+        m.updateGL();
+      }
+    }
    if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
       if (show_sf) {
         phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
@@ -437,7 +444,7 @@ int main(int argc, char **argv) {
       }
       if (show_cp) {
         reset_points(points);
-        set_points(critical[selected_entry],points,point_size);
+        set_points(critical[selected_entry],points,point_size*point_multiplier);
       }
       if (show_sf || show_cp) m.updateGL();
     }
