@@ -202,7 +202,7 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
 
 //=========================== PROCESSING FUNCTIONS =============================
 
-vector<Eigen::VectorXd> Build_discrete_ss_exp(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+vector<Eigen::VectorXd> Build_disc_ss_exp(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
                                                     double time_scalar, double time_multiplier, int levels) 
 // compute a discrete scale-space with "levels" levels from input field f on shape m
 // applies diffusion flow "levels" times with exponentially increasing diffusion coefficient:
@@ -225,7 +225,7 @@ vector<Eigen::VectorXd> Build_discrete_ss_exp(const DrawableTrimesh<> &m, const 
   return buf;
 }
 
-vector<Eigen::VectorXd> Build_discrete_ss_lin(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+vector<Eigen::VectorXd> Build_disc_ss_lin(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
                                                     double time_scalar, int stride, int levels) 
 // compute a discrete scale-space with "levels" levels from input field f on shape m
 // applies diffusion flow stride*levels times with diffusion coefficient time_scalar,
@@ -319,7 +319,11 @@ int main(int argc, char **argv) {
   for (auto i=0;i<nverts;i++) VV[i]=m.vert_ordered_verts_link(i);
   // uncomment the following and adjust parameters if you want a smoother mesh
   // MCF(m,12,1e-5,true);
- 
+  m.normalize_bbox();
+  m.center_bbox();  
+  m.update_bbox(); 
+  m.updateGL();     
+
   // OUTPUT FIELDS
   uint nlevels = stoi(argv[2]); 
   vector<vector<double>> fields(nlevels,vector<double>(nverts));
@@ -334,7 +338,8 @@ int main(int argc, char **argv) {
   cout << "Computing discrete scale space: \n";
   double t_step = stod(argv[3]);
   double diff_coeff = stod(argv[4]);
-  vector<Eigen::VectorXd> efields = Build_discrete_ss_lin(m,f,t_step,diff_coeff,nlevels);
+  // vector<Eigen::VectorXd> efields = Build_disc_ss_exp(m,f,t_step,diff_coeff,nlevels);
+  vector<Eigen::VectorXd> efields = Build_disc_ss_lin(m,f,t_step,(int)diff_coeff,nlevels);
   for (auto i=0;i<efields.size();i++) // convert from Eigen to std::vector
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
   cout << "done"<< endl;
@@ -365,6 +370,7 @@ int main(int argc, char **argv) {
   float curr_clamp[2];
   bool show_sf = false;
   bool show_cp = false;
+  bool show_m = true;
   bool show_wf = false;
   gui.side_bar_width = 0.3;
   gui.show_side_bar = true;
@@ -384,6 +390,12 @@ int main(int argc, char **argv) {
     if (ImGui::Checkbox("Show wireframe", &show_wf)) {
       if (show_wf) m.show_wireframe(true);
       else m.show_wireframe(false);
+      m.updateGL();
+    } 
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Show mesh", &show_m)) {
+      if (show_m) m.show_mesh(true);
+      else m.show_mesh(false);
       m.updateGL();
     } 
     if (ImGui::Checkbox("Show Scalar Field", &show_sf)) {
