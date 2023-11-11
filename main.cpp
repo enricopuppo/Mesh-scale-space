@@ -179,7 +179,7 @@ Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
   Eigen::VectorXd buf;
   // buf = Mean_curvature(m);
   // buf = gaussian_curvature(m);
-  buf =  Laplacian_eigenfunction(m,50,2);
+  buf =  Laplacian_eigenfunction(m,2,2);
   // buf = Coordinate(m,1);
   // buf = Random_field(m);
   normalize_in_01(buf);
@@ -202,8 +202,12 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
 
 //=========================== PROCESSING FUNCTIONS =============================
 
-vector<Eigen::VectorXd> Build_discrete_ss(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+vector<Eigen::VectorXd> Build_discrete_ss_exp(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
                                                     double time_scalar, double time_multiplier, int levels) 
+// compute a discrete scale-space with "levels" levels from input field f on shape m
+// applies diffusion flow "levels" times with exponentially increasing diffusion coefficient:
+// initial coefficient time_scalar is multiplied by time_multiplier at each iteration
+// cumulative smoothing: input field at iteration i is the smoothed field at iteration i-1
 {
   Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
   Eigen::SparseMatrix<double> MM = mass_matrix(m);
@@ -221,10 +225,40 @@ vector<Eigen::VectorXd> Build_discrete_ss(const DrawableTrimesh<> &m, const Eige
   return buf;
 }
 
+vector<Eigen::VectorXd> Build_discrete_ss_lin(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+                                                    double time_scalar, int stride, int levels) 
+// compute a discrete scale-space with "levels" levels from input field f on shape m
+// applies diffusion flow stride*levels times with diffusion coefficient time_scalar,
+// saving one level every stride iterations
+// cumulative smoothing: input field at iteration i is the smoothed field at iteration i-1
+{
+  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+  Eigen::SparseMatrix<double> MM = mass_matrix(m);
+  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
+  vector<Eigen::VectorXd> buf(levels);
+  Eigen::VectorXd f1(f);
+  normalize_in_01(f1);
+  buf[0]=f1;
+  uint it = levels * stride;
+  for (auto i=1;i<it;i++) {
+   // backward Euler time integration of heat flow equation
+     f1 = LLT.solve(MM * f1);
+     normalize_in_01(f1);
+     if (i%stride==0) {
+       buf[i/stride] = f1; 
+       cout << "level "<< i/stride << " completed\n";
+     }
+  }
+  return buf;
+}
+
 vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const vector<vector<uint>> &VV,
                                           const Eigen::VectorXd &f, vector<vector<int>> &ties)
+// find critical points of field f on shape m
+// return a vector indexed on vertices of m: -1 regular; 0 minimum; 1 maximum; k>1 (k-1)-saddle
+// VV is vector of vertex-vertex topological relations of m
+// ties reports edges with equal field values at both endpoints, if any, as pairs of vertex indices 
 {
-  // -1 regular; 0 minimum; 1 maximum; k>1 (k-1)-saddle
   vector<int> buf(f.size());
   uint nv = m.num_verts();
   for(uint vid=0; vid<nv; vid++) {
@@ -253,6 +287,7 @@ vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const vector<vector
 }
 
 void print_statistics(const vector<vector<int>> &c)
+// print the number and types of critical points at all levels of the discrete ss
 {
   for (uint i=0;i<c.size();i++) {
     cout << "Field " << i << ": ";
@@ -299,7 +334,7 @@ int main(int argc, char **argv) {
   cout << "Computing discrete scale space: \n";
   double t_step = stod(argv[3]);
   double diff_coeff = stod(argv[4]);
-  vector<Eigen::VectorXd> efields = Build_discrete_ss(m,f,t_step,diff_coeff,nlevels);
+  vector<Eigen::VectorXd> efields = Build_discrete_ss_lin(m,f,t_step,diff_coeff,nlevels);
   for (auto i=0;i<efields.size();i++) // convert from Eigen to std::vector
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
   cout << "done"<< endl;
@@ -324,13 +359,14 @@ int main(int argc, char **argv) {
   print_statistics(critical);
 
   // GUI
-  GLcanvas gui;
+  GLcanvas gui(1500,700);
   ScalarField phi;
   int selected_entry = 0;
   float curr_clamp[2];
   bool show_sf = false;
   bool show_cp = false;
   bool show_wf = false;
+  gui.side_bar_width = 0.3;
   gui.show_side_bar = true;
 
   // bullets for rendering critical points
