@@ -9,18 +9,19 @@
 using namespace std;
 using namespace cinolib;
 
-//::::::::::::::::::::::::::::::::::::GUI utilitIES ::::::::::::::::::::::::::::::::::::
+//::::::::::::::::::::::::::::::::::::GUI utilities ::::::::::::::::::::::::::::::::::::
 
-inline void draw_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
+// functions to  render vertices as spheres
+inline void draw_points(const vector<DrawableSphere> &cp, GLcanvas &gui) {
   for (auto &point : cp) //if (point.radius > 0) 
   gui.push(&point, false);
 }
 
-inline void remove_cp(const vector<DrawableSphere> &cp, GLcanvas &gui) {
+inline void remove_points(const vector<DrawableSphere> &cp, GLcanvas &gui) {
   for (auto &point : cp) gui.pop(&point);
 }
 
-inline void set_critical_points(const vector<int> &c, vector<DrawableSphere> &cp, float s)
+inline void set_points(const vector<int> &c, vector<DrawableSphere> &cp, float s)
 {
   for (uint i=0;i<c.size();i++) {
     if (c[i]==-1) continue;
@@ -31,7 +32,7 @@ inline void set_critical_points(const vector<int> &c, vector<DrawableSphere> &cp
   }
 }
 
-inline void reset_critical_points(vector<DrawableSphere> &cp)
+inline void reset_points(vector<DrawableSphere> &cp)
 {
   for (auto &point : cp) {
     point.radius = 0.0;
@@ -39,6 +40,7 @@ inline void reset_critical_points(vector<DrawableSphere> &cp)
   }
 }
 
+// ------------
 ScalarField Clamp_and_rescale_field(const vector<double> &f, const float cl[])
 // f field is in [0,1] both in input and in output
 // cl clamp limits: clamp f in [cl[0],cl[1]] and rescale it to [0,1]
@@ -68,6 +70,7 @@ void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
   }
 }
 
+// rescale all values of vector to [0,1]
 void normalize_in_01(Eigen::VectorXd &f)
 {
     long double min = f.minCoeff();
@@ -78,19 +81,16 @@ void normalize_in_01(Eigen::VectorXd &f)
 
 //==================== FIELD GENERATORS ========================
 
+// Gaussian curvature (angle defect)
 double compute_theta(const DrawableTrimesh<> &m, const int tid, const int vid) {
   uint k = m.poly_vert_offset(tid, vid);
   uint vid1 = m.poly_vert_id(tid, (k + 1) % 3);
   uint vid2 = m.poly_vert_id(tid, (k + 2) % 3);
-
   vec3d v1 = m.vert(vid1)-m.vert(vid);
   vec3d v2 = m.vert(vid2)-m.vert(vid);
-
   double theta = v1.angle_rad(v2);
-
   return theta;
 }
-
 double gaussian_curvature(const DrawableTrimesh<> &m, const int vid) {
   double result = 0.;
   vector<uint> star = m.adj_v2p(vid);
@@ -98,7 +98,6 @@ double gaussian_curvature(const DrawableTrimesh<> &m, const int vid) {
     result += compute_theta(m, tid, vid);
   return 2 * M_PI - result;
 }
-
 Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &m) {
   Eigen::VectorXd result(m.num_verts());
   for (uint i = 0; i < m.num_verts(); ++i)
@@ -106,9 +105,14 @@ Eigen::VectorXd gaussian_curvature(const DrawableTrimesh<> &m) {
   return result;
 }
 
-Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m, const Eigen::SparseMatrix<double> &ML)
+// Mean curvature (Laplacian)
+Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m)
 {
   uint nv = m.num_verts();
+  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+  Eigen::SparseMatrix<double> M = mass_matrix(m);
+  InvertSparseMatrix(M);
+  L = M * L;
   Eigen::MatrixXd V(nv,3);
   for(uint vid=0; vid<nv; ++vid) {
       vec3d pos = m.vert(vid);
@@ -116,29 +120,68 @@ Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m, const Eigen::SparseM
       V(vid,1) = pos.y();
       V(vid,2) = pos.z();
   }
-  Eigen::MatrixXd Hn = ML * V;
+  Eigen::MatrixXd Hn = L * V;
   Hn *= -0.5;
   Eigen::VectorXd H(nv);
   for(uint vid=0; vid<nv; ++vid) {
     H(vid)=Hn.row(vid).norm();
     vec3d Hni(Hn(vid,0),Hn(vid,1),Hn(vid,2));
-    vec3d n = m.vert_data(vid).normal;      //vert_data(vid).normal;
+    vec3d n = m.vert_data(vid).normal;
     if (Hni.dot(n)<0) H(vid) = -H(vid); 
   }
   return H;
 }
 
+// Eigenfunctions of the Laplacian
+Eigen::VectorXd Laplacian_eigenfunction(const DrawableTrimesh<> & m, int maxe, int k)
+// compute maxe eigenfunctions and return the k-th
+// warning: result changes depending on the value of maxe>=k
+{
+  uint nv = m.num_verts();
+  vector<double> eig;
+  vector<double> f_min;
+  vector<double> f_max;
+  Eigen::SparseMatrix<double> L = laplacian(m, COTANGENT);
+  matrix_eigenfunctions(L, true, maxe, eig, f_min, f_max);
+  Eigen::VectorXd buf(nv);
+  for (auto i=0;i<nv;i++) 
+    buf[i]=eig[(k-1)*nv+i]; 
+  return buf;
+}
+
+Eigen::VectorXd Coordinate(const DrawableTrimesh<> & m, int coord)
+// return coordinate of vertices selected by coord: 0 -> x, 1 -> y, 2 ->z
+{
+  uint nv = m.num_verts();
+  Eigen::VectorXd buf(nv);
+  for (auto i=0;i<nv;i++) 
+    buf[i]=m.vert(i)[coord]; 
+  return buf;
+   
+}
+
+Eigen::VectorXd Random_field(const DrawableTrimesh<> & m)
+{
+  uint nv = m.num_verts();
+  Eigen::VectorXd buf(nv);
+  srand(time(NULL));
+  for (auto i=0;i<nv;i++) 
+    buf[i]=(double)rand()/RAND_MAX; 
+  return buf;
+   
+}
+
+
+
 //=============================== INPUT FIELD ==================================
 Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
 {
-  // field is mean curvature 
-  Eigen::SparseMatrix<double> ML  = laplacian(m, COTANGENT);
-  Eigen::SparseMatrix<double> MM = mass_matrix(m);
   Eigen::VectorXd buf;
-  InvertSparseMatrix(MM);
-  ML = MM * ML;
-  buf = Mean_curvature(m,ML);
+  // buf = Mean_curvature(m);
   // buf = gaussian_curvature(m);
+  buf =  Laplacian_eigenfunction(m,50,2);
+  // buf = Coordinate(m,1);
+  // buf = Random_field(m);
   normalize_in_01(buf);
   return buf;
 }
@@ -159,11 +202,9 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
 
 //=========================== PROCESSING FUNCTIONS =============================
 
-vector<Eigen::VectorXd> Build_discrete_scale_space(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+vector<Eigen::VectorXd> Build_discrete_ss(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
                                                     double time_scalar, double time_multiplier, int levels) 
 {
-  // DrawableTrimesh<> m(m1);
-  // MCF(m,1);
   Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
   Eigen::SparseMatrix<double> MM = mass_matrix(m);
   vector<Eigen::VectorXd> buf(levels);
@@ -241,39 +282,37 @@ int main(int argc, char **argv) {
   uint nverts = m.num_verts();
   vector<vector<uint>> VV(nverts); // Vertex-Vertex relation
   for (auto i=0;i<nverts;i++) VV[i]=m.vert_ordered_verts_link(i);
-  // m.normalize_bbox();
-  // m.center_bbox();   
-  // MCF(m,1,0.0001);
+  // uncomment the following and adjust parameters if you want a smoother mesh
+  // MCF(m,12,1e-5,true);
  
   // OUTPUT FIELDS
   uint nlevels = stoi(argv[2]); 
   vector<vector<double>> fields(nlevels,vector<double>(nverts));
-
-  // GENERATE FIELD
-  Eigen::VectorXd f = Generate_field(m);
-  // f *= 100000000;
-  vector<float*> clamp_limits(nlevels);
+  vector<float*> clamp_limits(nlevels); // clamp limits for field visualization at all levels
   for (auto &l : clamp_limits) l = new float[2];
 
-  // COMPUTE
+  // GENERATE FIELD
+  // change this function if you want to generate a different field
+  Eigen::VectorXd f = Generate_field(m);
+
+  // COMPUTE DISCRETE SCALE SPACE
   cout << "Computing discrete scale space: \n";
-  double time_step = stod(argv[3]);
-  double time_mult = stod(argv[4]);
-  vector<Eigen::VectorXd> efields = Build_discrete_scale_space(m,f,time_step,time_mult,nlevels);
-  for (auto i=0;i<efields.size();i++) {
+  double t_step = stod(argv[3]);
+  double diff_coeff = stod(argv[4]);
+  vector<Eigen::VectorXd> efields = Build_discrete_ss(m,f,t_step,diff_coeff,nlevels);
+  for (auto i=0;i<efields.size();i++) // convert from Eigen to std::vector
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
-  }
   cout << "done"<< endl;
 
-  for (auto i=0;i<nlevels;i++) 
-    Set_clamp_limits(efields[i], 2, clamp_limits[i]); // set clamp limits to sigma
+  for (auto i=0;i<nlevels;i++) // set clamp limits for visualization
+    Set_clamp_limits(efields[i], 2, clamp_limits[i]); 
 
   cout << "Finding critical points: \n";
   vector<vector<int>> critical(nlevels,vector<int>(nverts));
-  vector<vector<int>> ties;
+  vector<vector<int>> ties; // "flat" edges
   for (auto i=0;i<efields.size();i++) {
     critical[i] = Find_Critical_Points(m,VV,efields[i],ties);
-    if (ties.size()>0) {
+    if (ties.size()>0) {    // report ties, if any
       cout << "Found ties at level " << i << ": ";
       for (auto i=0;i<ties.size();i++) 
         cout << "(" << ties[i][0] << "," << ties[i][1] << "), ";
@@ -294,15 +333,17 @@ int main(int argc, char **argv) {
   bool show_wf = false;
   gui.show_side_bar = true;
 
-  // bullets for critical points
+  // bullets for rendering critical points
   float point_size = m.edge_avg_length()/2;
   vector<DrawableSphere> points(nverts);
   for (uint i=0;i<nverts;i++)
     points[i]=DrawableSphere(m.vert(i),0.0,cinolib::Color::BLACK());
  
+  // render the mesh
   gui.push(&m);
   m.show_wireframe(false);
  
+  // GUI callbacks ==========================================
   gui.callback_app_controls = [&]() {
     if (ImGui::Checkbox("Show wireframe", &show_wf)) {
       if (show_wf) m.show_wireframe(true);
@@ -324,20 +365,15 @@ int main(int argc, char **argv) {
     ImGui::SameLine();
     if (ImGui::Checkbox("Show Critical Points", &show_cp)) {
       if (show_cp) {
-        set_critical_points(critical[selected_entry],points,point_size);
-        draw_cp(points,gui);
+        set_points(critical[selected_entry],points,point_size);
+        draw_points(points,gui);
       } else {
-        reset_critical_points(points);
-        remove_cp(points,gui);
+        reset_points(points);
+        remove_points(points,gui);
       }
       m.updateGL();
     } 
-    // if (ImGui::Button("Dummy button 2")) {
-    //   auto name0 = "CMFC" + name + ".obj";
-    //   write_OBJ(name0.c_str(), obj_wrapper(m.vector_verts()),
-    //             m.vector_polys());
-    // }
-    if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
+   if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
       if (show_sf) {
         phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
         phi.copy_to_mesh(m);
@@ -352,12 +388,18 @@ int main(int argc, char **argv) {
         phi.copy_to_mesh(m);
       }
       if (show_cp) {
-        reset_critical_points(points);
-        set_critical_points(critical[selected_entry],points,point_size);
+        reset_points(points);
+        set_points(critical[selected_entry],points,point_size);
       }
       if (show_sf || show_cp) m.updateGL();
     }
-  };
+    // JUST AN EXAMPLE OF BUTTON
+    // if (ImGui::Button("Dummy button 2")) {
+    //   auto name0 = "CMFC" + name + ".obj";
+    //   write_OBJ(name0.c_str(), obj_wrapper(m.vector_verts()),
+    //             m.vector_polys());
+    // }
+   };
 
   gui.callback_mouse_left_click = [&](int modifiers) -> bool {
     if (modifiers & GLFW_MOD_SHIFT) {
@@ -374,9 +416,12 @@ int main(int argc, char **argv) {
     }
     return false;
   };
+  // end GUI callbacks ==========================================
 
   return gui.launch();
 }
+
+
 //=========================== UNUSED FUNCTIONS =======================
 
 Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen::VectorXd & f,
