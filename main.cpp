@@ -177,8 +177,8 @@ Eigen::VectorXd Random_field(const DrawableTrimesh<> & m)
 Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
 {
   Eigen::VectorXd buf;
-  // buf = Mean_curvature(m);
-  buf = gaussian_curvature(m);
+  buf = Mean_curvature(m);
+  // buf = gaussian_curvature(m);
   // buf =  Laplacian_eigenfunction(m,50,2);
   // buf = Coordinate(m,1);
   // buf = Random_field(m);
@@ -321,7 +321,7 @@ int main(int argc, char **argv) {
   // MCF(m,12,1e-5,true);
   m.normalize_bbox();
   m.center_bbox();  
-  m.update_bbox(); 
+  // m.update_bbox(); 
   m.updateGL();     
 
   // OUTPUT FIELDS
