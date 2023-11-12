@@ -308,33 +308,30 @@ void print_statistics(const vector<vector<int>> &c)
 //=============================== MAIN =========================================
 
 int main(int argc, char **argv) {
-  if (argc<4) {cout << "Usage: Mesh_scale_space filename num_levels time_step\n"; return 1;}
+  if (argc<4) {cout << "Usage: Mesh_scale_space filename num_levels time_step multiplier/stride\n"; return 1;}
 
-  //INPUT MESH
-  auto name = std::string(argv[1]);
-  auto s = "../data/" + name;
+  //INPUT MESH::::::::::::::::::::::::::::::::::::
+  string s = "../data/" + string(argv[1]);
   DrawableTrimesh<> m(s.c_str());
   uint nverts = m.num_verts();
   vector<vector<uint>> VV(nverts); // Vertex-Vertex relation
   for (auto i=0;i<nverts;i++) VV[i]=m.vert_ordered_verts_link(i);
   // uncomment the following and adjust parameters if you want a smoother mesh
   // MCF(m,12,1e-5,true);
-  m.normalize_bbox();
-  m.center_bbox();  
-  // m.update_bbox(); 
+  m.normalize_bbox(); // rescale mesh to fit [0,1]^3 box
   m.updateGL();     
 
-  // OUTPUT FIELDS
+  // OUTPUT FIELDS::::::::::::::::::::::::::::::::
   uint nlevels = stoi(argv[2]); 
   vector<vector<double>> fields(nlevels,vector<double>(nverts));
   vector<float*> clamp_limits(nlevels); // clamp limits for field visualization at all levels
   for (auto &l : clamp_limits) l = new float[2];
 
-  // GENERATE FIELD
+  // GENERATE FIELD:::::::::::::::::::::::::::::::
   // change this function if you want to generate a different field
   Eigen::VectorXd f = Generate_field(m);
 
-  // COMPUTE DISCRETE SCALE SPACE
+  // COMPUTE DISCRETE SCALE SPACE:::::::::::::::::
   cout << "Computing discrete scale space: \n";
   double t_step = stod(argv[3]);
   double diff_coeff = stod(argv[4]);
@@ -363,7 +360,7 @@ int main(int argc, char **argv) {
   cout << "done"<< endl;
   print_statistics(critical);
 
-  // GUI
+  // GUI:::::::::::::::::::::::::::::::::::::::::
   GLcanvas gui(1500,700);
   ScalarField phi;
   int selected_entry = 0;
@@ -372,10 +369,10 @@ int main(int argc, char **argv) {
   bool show_cp = false;
   bool show_m = true;
   bool show_wf = false;
-  gui.side_bar_width = 0.3;
+  gui.side_bar_width = 0.25;
   gui.show_side_bar = true;
 
-  // bullets for rendering critical points
+  // spheres for rendering critical points - initially radius = 0
   float point_size = m.edge_avg_length()/2;
   float point_multiplier = 1.0;
   vector<DrawableSphere> points(nverts);
