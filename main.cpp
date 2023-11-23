@@ -14,21 +14,25 @@ using namespace cinolib;
 // functions to  render vertices as spheres
 inline void draw_points(const vector<DrawableSphere> &cp, GLcanvas &gui) {
   for (auto &point : cp) //if (point.radius > 0) 
-  gui.push(&point, false);
+    gui.push(&point, false);
 }
 
 inline void remove_points(const vector<DrawableSphere> &cp, GLcanvas &gui) {
   for (auto &point : cp) gui.pop(&point);
 }
 
-inline void set_points(const vector<int> &c, vector<DrawableSphere> &cp, float s)
+inline void set_points(const DrawableTrimesh<> &m, const vector<int> &c, vector<DrawableSphere> &cp, float s)
 {
+  cp.resize(0);
+  DrawableSphere buf;
+  buf.radius = s;
   for (uint i=0;i<c.size();i++) {
     if (c[i]==-1) continue;
-    cp[i].radius = s;
-    if (c[i]==0) cp[i].color = cinolib::Color::BLUE();
-    else if (c[i]==1) cp[i].color = cinolib::Color::RED();
-    else cp[i].color = cinolib::Color::GREEN();
+    if (c[i]==0) buf.color = cinolib::Color::BLUE();
+    else if (c[i]==1) buf.color = cinolib::Color::RED();
+    else buf.color = cinolib::Color::GREEN();
+    buf.center = m.vert(i);
+    cp.push_back(buf);
   }
 }
 
@@ -177,9 +181,9 @@ Eigen::VectorXd Random_field(const DrawableTrimesh<> & m)
 Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
 {
   Eigen::VectorXd buf;
-  buf = Mean_curvature(m);
-  // buf = gaussian_curvature(m);
-  // buf =  Laplacian_eigenfunction(m,50,2);
+  // buf = Mean_curvature(m);
+  buf = gaussian_curvature(m);
+  // buf =  Laplacian_eigenfunction(m,100,10);
   // buf = Coordinate(m,1);
   // buf = Random_field(m);
   normalize_in_01(buf);
@@ -195,59 +199,46 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
   double sigma = sqrt(s.sum()/s.size());
   // cl[0] = mean - sigma_multiplier * sigma;
   // cl[1] = mean + sigma_multiplier * sigma;
-  cl[0] = std::max(mean - sigma_multiplier * sigma,0.0);
-  cl[1] = std::min(mean + sigma_multiplier * sigma,1.0);
+  cl[0] = std::max(mean - sigma_multiplier * sigma,f.minCoeff());
+  cl[1] = std::min(mean + sigma_multiplier * sigma,f.maxCoeff());
   // cout << "clamp limits: " << cl[0] << ", " << cl[1] << endl;
 }
 
 //=========================== PROCESSING FUNCTIONS =============================
 
-vector<Eigen::VectorXd> Build_disc_ss_exp(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
-                                                    double time_scalar, double time_multiplier, int levels) 
+vector<Eigen::VectorXd> Build_disc_ss(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
+                                            int levels, double time_scalar = 0.01, double mult = 1, 
+                                            bool linear = true, bool normalize = false) 
 // compute a discrete scale-space with "levels" levels from input field f on shape m
-// applies diffusion flow "levels" times with exponentially increasing diffusion coefficient:
-// initial coefficient time_scalar is multiplied by time_multiplier at each iteration
+// if linear applies diffusion flow levels * mult times with steady coefficient time_scalar
+// else applies diffusion flow "levels" times with exponentially increasing diffusion coefficient:
+// initial coefficient time_scalar is multiplied by mult at each iteration
 // cumulative smoothing: input field at iteration i is the smoothed field at iteration i-1
+// if normalize the result is normalizd in [0,1] at each iteration
 {
   Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
   Eigen::SparseMatrix<double> MM = mass_matrix(m);
-  vector<Eigen::VectorXd> buf(levels);
-  buf[0]=f;
-  normalize_in_01(buf[0]);
-  for (auto i=1;i<levels;i++) {
-    if (i%10==0) cout << "level "<< i << " completed\n";
-    // backward Euler time integration of heat flow equation
-    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-    buf[i] = LLT.solve(MM * buf[i-1]);
-    normalize_in_01(buf[i]);
-    time_scalar *= time_multiplier;
-  }
-  return buf;
-}
-
-vector<Eigen::VectorXd> Build_disc_ss_lin(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
-                                                    double time_scalar, int stride, int levels) 
-// compute a discrete scale-space with "levels" levels from input field f on shape m
-// applies diffusion flow stride*levels times with diffusion coefficient time_scalar,
-// saving one level every stride iterations
-// cumulative smoothing: input field at iteration i is the smoothed field at iteration i-1
-{
-  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
-  Eigen::SparseMatrix<double> MM = mass_matrix(m);
-  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
   vector<Eigen::VectorXd> buf(levels);
   Eigen::VectorXd f1(f);
-  normalize_in_01(f1);
+  if (normalize) normalize_in_01(f1);
   buf[0]=f1;
-  uint it = levels * stride;
-  for (auto i=1;i<it;i++) {
-   // backward Euler time integration of heat flow equation
-     f1 = LLT.solve(MM * f1);
-     normalize_in_01(f1);
-     if (i%stride==0) {
-       buf[i/stride] = f1; 
-       cout << "level "<< i/stride << " completed\n";
-     }
+
+  if (linear) cout << "linear progression\n"; else cout << "exponential progression\n";
+
+  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
+  for (auto i=1;i<levels;i++) {
+    // iterated backward Euler time integration of heat flow equation
+    if (linear) {
+      int nit = (int)mult;
+      for (int j=0;j<nit;j++) f1 = LLT.solve(MM * f1);
+      buf[i] = f1;
+    } else {
+      if (i>0) Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
+      buf[i] = LLT.solve(MM * buf[i-1]);
+      time_scalar *= mult;
+    }
+    if (normalize) normalize_in_01(buf[i]);
+    cout << "level "<< i << " completed\n";
   }
   return buf;
 }
@@ -332,11 +323,10 @@ int main(int argc, char **argv) {
   Eigen::VectorXd f = Generate_field(m);
 
   // COMPUTE DISCRETE SCALE SPACE:::::::::::::::::
-  cout << "Computing discrete scale space: \n";
+  cout << "Computing discrete scale space: ";
   double t_step = stod(argv[3]);
-  double diff_coeff = stod(argv[4]);
-  // vector<Eigen::VectorXd> efields = Build_disc_ss_exp(m,f,t_step,diff_coeff,nlevels);
-  vector<Eigen::VectorXd> efields = Build_disc_ss_lin(m,f,t_step,(int)diff_coeff,nlevels);
+  double mult = stod(argv[4]);
+  vector<Eigen::VectorXd> efields = Build_disc_ss(m,f,nlevels,t_step,mult,true,true);
   for (auto i=0;i<efields.size();i++) // convert from Eigen to std::vector
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
   cout << "done"<< endl;
@@ -375,9 +365,7 @@ int main(int argc, char **argv) {
   // spheres for rendering critical points - initially radius = 0
   float point_size = m.edge_avg_length()/2;
   float point_multiplier = 1.0;
-  vector<DrawableSphere> points(nverts);
-  for (uint i=0;i<nverts;i++)
-    points[i]=DrawableSphere(m.vert(i),0.0,cinolib::Color::BLACK());
+  vector<DrawableSphere> points;
  
   // render the mesh
   gui.push(&m);
@@ -401,7 +389,6 @@ int main(int argc, char **argv) {
         curr_clamp[0]=clamp_limits[selected_entry][0];
         curr_clamp[1]=clamp_limits[selected_entry][1];
         phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
-        // phi.normalize_in_01();
         phi.copy_to_mesh(m);
         m.show_texture1D(TEXTURE_1D_HSV);
       } else {
@@ -411,39 +398,43 @@ int main(int argc, char **argv) {
     ImGui::SameLine();
     if (ImGui::Checkbox("Show Critical Points", &show_cp)) {
       if (show_cp) {
-        set_points(critical[selected_entry],points,point_size*point_multiplier);
+        set_points(m,critical[selected_entry],points,point_size*point_multiplier);
         draw_points(points,gui);
-      } else {
-        reset_points(points);
+      } else 
         remove_points(points,gui);
-      }
       m.updateGL();
     } 
     if (ImGui::SliderFloat("Point size", &point_multiplier, 0, 10.0, "%.1f")) {
       if (show_cp) {
-        set_points(critical[selected_entry],points,point_size*point_multiplier);
+        set_points(m,critical[selected_entry],points,point_size*point_multiplier);
         m.updateGL();
       }
     }
-   if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
+    if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
+  //  if (ImGui::InputFloat2("Clamp values", curr_clamp,"%.4f")) {
       if (show_sf) {
         phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
         phi.copy_to_mesh(m);
         m.updateGL();
       }
     }
-    if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
-      if (show_sf) {
-        curr_clamp[0]=clamp_limits[selected_entry][0];
-        curr_clamp[1]=clamp_limits[selected_entry][1];
-        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
-        phi.copy_to_mesh(m);
+    // if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
+    if (ImGui::InputInt("Choose level", &selected_entry)) {
+      if (selected_entry>=nlevels) selected_entry = nlevels-1;
+      else {
+        if (show_sf) {
+          curr_clamp[0]=clamp_limits[selected_entry][0];
+          curr_clamp[1]=clamp_limits[selected_entry][1];
+          phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
+          phi.copy_to_mesh(m);
+        }
+        if (show_cp) {
+          remove_points(points,gui);
+          set_points(m,critical[selected_entry],points,point_size*point_multiplier);
+          draw_points(points,gui);
+        }
+        if (show_sf || show_cp) m.updateGL();
       }
-      if (show_cp) {
-        reset_points(points);
-        set_points(critical[selected_entry],points,point_size*point_multiplier);
-      }
-      if (show_sf || show_cp) m.updateGL();
     }
     // JUST AN EXAMPLE OF BUTTON
     // if (ImGui::Button("Dummy button 2")) {
