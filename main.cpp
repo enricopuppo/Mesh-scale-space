@@ -9,6 +9,35 @@
 using namespace std;
 using namespace cinolib;
 
+//:::::::::::::::::::::::::::: GLOBAL VARIABLES (FOR GUI) ::::::::::::::::::::::::::::::
+// Input
+  DrawableTrimesh<> m;            // the input mesh
+  uint nverts;                    // its #vertices
+  vector<vector<uint>> VV;        // its VV relation
+// Output
+  vector<vector<double>> fields;  // the discrete scale-space
+  uint nlevels;                   // # levels in the scale-space 
+  vector<float*> clamp_limits;    // clamp limits for field visualization at all levels
+// Processing
+  Eigen::VectorXd f;              // base field on m
+  double t_step;                  // base time step of diffusion
+  double mult;                    // multiplicator/stride of time step in diffusion
+  vector<vector<int>> critical;   // critical points at all levels
+// GUI
+  ScalarField phi;
+  int selected_entry = 0;
+  float curr_clamp[2];
+  bool show_sf = false;
+  bool show_cp = false;
+  bool show_m = true;
+  bool show_wf = false;
+  vector<DrawableSphere> points;  // spheres for rendering critical points
+  float point_size;               // base radius of spheres
+  float point_multiplier = 1.0;   // multiplier of radius
+ 
+
+
+
 //::::::::::::::::::::::::::::::::::::GUI utilities ::::::::::::::::::::::::::::::::::::
 
 // functions to  render vertices as spheres
@@ -58,6 +87,111 @@ ScalarField Clamp_and_rescale_field(const vector<double> &f, const float cl[])
   // cout << "rescaled in [" << sf.minCoeff() << "," << sf.maxCoeff() << "]\n";
   return sf;
 }
+
+//::::::::::::::::::::::::::::::::: GUI ::::::::::::::::::::::::::::::::::::::::::::::::
+
+GLcanvas Init_GUI()
+{
+  GLcanvas gui(1500,700);
+  gui.side_bar_width = 0.25;
+  gui.show_side_bar = true;
+  point_size = m.edge_avg_length()/2; // set initial radius of spheres for critical points
+  return gui;
+}
+
+void Setup_GUI_Callbacks(GLcanvas & gui)
+{
+  gui.callback_app_controls = [&]() {
+    if (ImGui::Checkbox("Show wireframe", &show_wf)) {
+      if (show_wf) m.show_wireframe(true);
+      else m.show_wireframe(false);
+      m.updateGL();
+    } 
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Show mesh", &show_m)) {
+      if (show_m) m.show_mesh(true);
+      else m.show_mesh(false);
+      m.updateGL();
+    } 
+    if (ImGui::Checkbox("Show Scalar Field", &show_sf)) {
+      if (show_sf) {
+        curr_clamp[0]=clamp_limits[selected_entry][0];
+        curr_clamp[1]=clamp_limits[selected_entry][1];
+        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
+        phi.copy_to_mesh(m);
+        m.show_texture1D(TEXTURE_1D_HSV);
+      } else {
+        m.show_poly_color();
+      }
+    } 
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Show Critical Points", &show_cp)) {
+      if (show_cp) {
+        set_points(m,critical[selected_entry],points,point_size*point_multiplier);
+        draw_points(points,gui);
+      } else 
+        remove_points(points,gui);
+      m.updateGL();
+    } 
+    if (ImGui::SliderFloat("Point size", &point_multiplier, 0, 10.0, "%.1f")) {
+      if (show_cp) {
+        set_points(m,critical[selected_entry],points,point_size*point_multiplier);
+        m.updateGL();
+      }
+    }
+    if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
+  //  if (ImGui::InputFloat2("Clamp values", curr_clamp,"%.4f")) {
+      if (show_sf) {
+        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
+        phi.copy_to_mesh(m);
+        m.updateGL();
+      }
+    }
+    // if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
+    if (ImGui::InputInt("Choose level", &selected_entry)) {
+      if (selected_entry>=nlevels) selected_entry = nlevels-1;
+      else {
+        if (show_sf) {
+          curr_clamp[0]=clamp_limits[selected_entry][0];
+          curr_clamp[1]=clamp_limits[selected_entry][1];
+          phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
+          phi.copy_to_mesh(m);
+        }
+        if (show_cp) {
+          remove_points(points,gui);
+          set_points(m,critical[selected_entry],points,point_size*point_multiplier);
+          draw_points(points,gui);
+        }
+        if (show_sf || show_cp) m.updateGL();
+      }
+    }
+    // JUST AN EXAMPLE OF BUTTON
+    // if (ImGui::Button("Dummy button 2")) {
+    //   auto name0 = "CMFC" + name + ".obj";
+    //   write_OBJ(name0.c_str(), obj_wrapper(m.vector_verts()),
+    //             m.vector_polys());
+    // }
+   };
+
+  gui.callback_mouse_left_click = [&](int modifiers) -> bool {
+    if (modifiers & GLFW_MOD_SHIFT) {
+      vec3d p;
+      vec2d click = gui.cursor_pos();
+      if (gui.unproject(click, p)) {
+        uint vid = m.pick_vert(p);
+        cout << "Picked vertex " << vid << " field value " 
+              << std::setprecision(20) << fields[selected_entry][vid] 
+              << " at level " << selected_entry << endl;
+        // m.vert_data(vid).color = Color::RED();
+        // m.updateGL();
+      }
+    }
+    return false;
+  };
+
+}
+
+
 
 //====================== GENERAL UTILITIES =============================================
 
@@ -303,9 +437,9 @@ int main(int argc, char **argv) {
 
   //INPUT MESH::::::::::::::::::::::::::::::::::::
   string s = "../data/" + string(argv[1]);
-  DrawableTrimesh<> m(s.c_str());
-  uint nverts = m.num_verts();
-  vector<vector<uint>> VV(nverts); // Vertex-Vertex relation
+  m = DrawableTrimesh<>(s.c_str());
+  nverts = m.num_verts();
+  VV.resize(nverts); // fill in Vertex-Vertex relation
   for (auto i=0;i<nverts;i++) VV[i]=m.vert_ordered_verts_link(i);
   // uncomment the following and adjust parameters if you want a smoother mesh
   // MCF(m,12,1e-5,true);
@@ -313,19 +447,19 @@ int main(int argc, char **argv) {
   m.updateGL();     
 
   // OUTPUT FIELDS::::::::::::::::::::::::::::::::
-  uint nlevels = stoi(argv[2]); 
-  vector<vector<double>> fields(nlevels,vector<double>(nverts));
-  vector<float*> clamp_limits(nlevels); // clamp limits for field visualization at all levels
+  nlevels = stoi(argv[2]); 
+  fields = vector<vector<double>>(nlevels,vector<double>(nverts));
+  clamp_limits = vector<float*>(nlevels);
   for (auto &l : clamp_limits) l = new float[2];
 
   // GENERATE FIELD:::::::::::::::::::::::::::::::
   // change this function if you want to generate a different field
-  Eigen::VectorXd f = Generate_field(m);
+  f = Generate_field(m);
 
   // COMPUTE DISCRETE SCALE SPACE:::::::::::::::::
   cout << "Computing discrete scale space: ";
-  double t_step = stod(argv[3]);
-  double mult = stod(argv[4]);
+  t_step = stod(argv[3]);
+  mult = stod(argv[4]);
   vector<Eigen::VectorXd> efields = Build_disc_ss(m,f,nlevels,t_step,mult,true,true);
   for (auto i=0;i<efields.size();i++) // convert from Eigen to std::vector
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
@@ -335,7 +469,7 @@ int main(int argc, char **argv) {
     Set_clamp_limits(efields[i], 2, clamp_limits[i]); 
 
   cout << "Finding critical points: \n";
-  vector<vector<int>> critical(nlevels,vector<int>(nverts));
+  critical = vector<vector<int>>(nlevels,vector<int>(nverts));
   vector<vector<int>> ties; // "flat" edges
   for (auto i=0;i<efields.size();i++) {
     critical[i] = Find_Critical_Points(m,VV,efields[i],ties);
@@ -350,166 +484,14 @@ int main(int argc, char **argv) {
   cout << "done"<< endl;
   print_statistics(critical);
 
-  // GUI:::::::::::::::::::::::::::::::::::::::::
-  GLcanvas gui(1500,700);
-  ScalarField phi;
-  int selected_entry = 0;
-  float curr_clamp[2];
-  bool show_sf = false;
-  bool show_cp = false;
-  bool show_m = true;
-  bool show_wf = false;
-  gui.side_bar_width = 0.25;
-  gui.show_side_bar = true;
 
-  // spheres for rendering critical points - initially radius = 0
-  float point_size = m.edge_avg_length()/2;
-  float point_multiplier = 1.0;
-  vector<DrawableSphere> points;
- 
+  // setup GUI
+  GLcanvas gui = Init_GUI();
+  Setup_GUI_Callbacks(gui);
+
   // render the mesh
   gui.push(&m);
   m.show_wireframe(false);
  
-  // GUI callbacks ==========================================
-  gui.callback_app_controls = [&]() {
-    if (ImGui::Checkbox("Show wireframe", &show_wf)) {
-      if (show_wf) m.show_wireframe(true);
-      else m.show_wireframe(false);
-      m.updateGL();
-    } 
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Show mesh", &show_m)) {
-      if (show_m) m.show_mesh(true);
-      else m.show_mesh(false);
-      m.updateGL();
-    } 
-    if (ImGui::Checkbox("Show Scalar Field", &show_sf)) {
-      if (show_sf) {
-        curr_clamp[0]=clamp_limits[selected_entry][0];
-        curr_clamp[1]=clamp_limits[selected_entry][1];
-        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
-        phi.copy_to_mesh(m);
-        m.show_texture1D(TEXTURE_1D_HSV);
-      } else {
-        m.show_poly_color();
-      }
-    } 
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Show Critical Points", &show_cp)) {
-      if (show_cp) {
-        set_points(m,critical[selected_entry],points,point_size*point_multiplier);
-        draw_points(points,gui);
-      } else 
-        remove_points(points,gui);
-      m.updateGL();
-    } 
-    if (ImGui::SliderFloat("Point size", &point_multiplier, 0, 10.0, "%.1f")) {
-      if (show_cp) {
-        set_points(m,critical[selected_entry],points,point_size*point_multiplier);
-        m.updateGL();
-      }
-    }
-    if (ImGui::SliderFloat2("Clamp values", curr_clamp, f.minCoeff(), f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
-  //  if (ImGui::InputFloat2("Clamp values", curr_clamp,"%.4f")) {
-      if (show_sf) {
-        phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
-        phi.copy_to_mesh(m);
-        m.updateGL();
-      }
-    }
-    // if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
-    if (ImGui::InputInt("Choose level", &selected_entry)) {
-      if (selected_entry>=nlevels) selected_entry = nlevels-1;
-      else {
-        if (show_sf) {
-          curr_clamp[0]=clamp_limits[selected_entry][0];
-          curr_clamp[1]=clamp_limits[selected_entry][1];
-          phi = Clamp_and_rescale_field(fields[selected_entry],curr_clamp);
-          phi.copy_to_mesh(m);
-        }
-        if (show_cp) {
-          remove_points(points,gui);
-          set_points(m,critical[selected_entry],points,point_size*point_multiplier);
-          draw_points(points,gui);
-        }
-        if (show_sf || show_cp) m.updateGL();
-      }
-    }
-    // JUST AN EXAMPLE OF BUTTON
-    // if (ImGui::Button("Dummy button 2")) {
-    //   auto name0 = "CMFC" + name + ".obj";
-    //   write_OBJ(name0.c_str(), obj_wrapper(m.vector_verts()),
-    //             m.vector_polys());
-    // }
-   };
-
-  gui.callback_mouse_left_click = [&](int modifiers) -> bool {
-    if (modifiers & GLFW_MOD_SHIFT) {
-      vec3d p;
-      vec2d click = gui.cursor_pos();
-      if (gui.unproject(click, p)) {
-        uint vid = m.pick_vert(p);
-        cout << "Picked vertex " << vid << " field value " 
-              << std::setprecision(20) << fields[selected_entry][vid] 
-              << " at level " << selected_entry << endl;
-        // m.vert_data(vid).color = Color::RED();
-        // m.updateGL();
-      }
-    }
-    return false;
-  };
-  // end GUI callbacks ==========================================
-
   return gui.launch();
 }
-
-
-//=========================== UNUSED FUNCTIONS =======================
-
-Eigen::VectorXd Laplacian_smooth_signal(const DrawableTrimesh<> & m, const Eigen::VectorXd & f,
-                                        double time_scalar)
-{
-    Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
-    Eigen::SparseMatrix<double> MM = mass_matrix(m);
-
-    // backward euler time integration of heat flow equation
-    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-    // return LLT.solve(MM * f);
-    Eigen::VectorXd x = LLT.solve(MM * f);
-    return x;
-}
-
-void Laplacian_smooth_mesh(DrawableTrimesh<> & m, const double time_scalar)
-{
-    Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
-    Eigen::SparseMatrix<double> MM = mass_matrix(m);
-
-    // backward euler time integration of heat flow equation
-    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-
-    uint nv = m.num_verts();
-    Eigen::VectorXd x(nv);
-    Eigen::VectorXd y(nv);
-    Eigen::VectorXd z(nv);
-
-    for(uint vid=0; vid<nv; ++vid) {
-      vec3d pos = m.vert(vid);
-      x[vid] = pos.x();
-      y[vid] = pos.y();
-      z[vid] = pos.z();
-    }
-
-    x = LLT.solve(MM * x);
-    y = LLT.solve(MM * y);
-    z = LLT.solve(MM * z);
-
-    for(uint vid=0; vid<m.num_verts(); ++vid) {
-      vec3d new_pos(x[vid], y[vid], z[vid]);
-      m.vert(vid) = new_pos;
-    }
-}
-
-
-
-
