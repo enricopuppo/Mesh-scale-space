@@ -2,6 +2,8 @@
 #include <cinolib/drawable_sphere.h>
 #include <cinolib/geodesics.h>
 #include <cinolib/gl/glcanvas.h>
+#include <cinolib/gl/file_dialog_open.h>
+#include <cinolib/gl/file_dialog_save.h>
 #include <cinolib/gradient.h>
 #include <cinolib/io/write_OBJ.h>
 #include <cinolib/mean_curv_flow.h>
@@ -102,6 +104,20 @@ GLcanvas Init_GUI()
 void Setup_GUI_Callbacks(GLcanvas & gui)
 {
   gui.callback_app_controls = [&]() {
+    ImGui::SeparatorText("Files");
+    if (ImGui::Button("Load mesh")) {
+      string filename = file_dialog_open();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save scale-space")){
+      string filename = file_dialog_save();
+    }
+
+    ImGui::SeparatorText("Field");
+
+    ImGui::SeparatorText("Processing");
+
+    ImGui::SeparatorText("View");
     if (ImGui::Checkbox("Show wireframe", &show_wf)) {
       if (show_wf) m.show_wireframe(true);
       else m.show_wireframe(false);
@@ -148,7 +164,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui)
       }
     }
     // if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
-    if (ImGui::InputInt("Choose level", &selected_entry)) {
+    if (ImGui::InputInt("Level", &selected_entry)) {
       if (selected_entry>=nlevels) selected_entry = nlevels-1;
       else {
         if (show_sf) {
