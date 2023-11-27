@@ -147,7 +147,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui)
         draw_points(points,gui);
       } else 
         remove_points(points,gui);
-      m.updateGL();
+      // m.updateGL();
     } 
     if (ImGui::SliderFloat("Point size", &point_multiplier, 0, 10.0, "%.1f")) {
       if (show_cp) {
@@ -336,7 +336,7 @@ Eigen::VectorXd Generate_field(const DrawableTrimesh<> &m)
   // buf =  Laplacian_eigenfunction(m,100,10);
   // buf = Coordinate(m,1);
   // buf = Random_field(m);
-  normalize_in_01(buf);
+  // normalize_in_01(buf);
   return buf;
 }
 
