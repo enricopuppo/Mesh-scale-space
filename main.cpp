@@ -12,11 +12,17 @@ using namespace std;
 using namespace cinolib;
 
 //:::::::::::::::::::::::::::: GLOBAL VARIABLES (FOR GUI) ::::::::::::::::::::::::::::::
+// State
+  bool MESH_IS_LOADED = false;
+  bool FIELD_IS_PRESENT = false;
+  bool SCALE_SPACE_IS_PRESENT = false;
 // Input
+  string filename;               // name of input file
   DrawableTrimesh<> m;            // the input mesh
   uint nverts;                    // its #vertices
   vector<vector<uint>> VV;        // its VV relation
 // Output
+  ScalarField phi;                // the base field
   vector<vector<double>> fields;  // the discrete scale-space
   uint nlevels;                   // # levels in the scale-space 
   vector<float*> clamp_limits;    // clamp limits for field visualization at all levels
@@ -26,7 +32,7 @@ using namespace cinolib;
   double mult;                    // multiplicator/stride of time step in diffusion
   vector<vector<int>> critical;   // critical points at all levels
 // GUI
-  ScalarField phi;
+  bool doit = false;                      // from modal popup window
   int selected_entry = 0;
   float curr_clamp[2];
   bool show_sf = false;
@@ -41,6 +47,40 @@ using namespace cinolib;
 
 
 //::::::::::::::::::::::::::::::::::::GUI utilities ::::::::::::::::::::::::::::::::::::
+
+void Load_mesh()
+{
+  string filename = file_dialog_open();
+  if (filename.size()!=0) {
+    m = DrawableTrimesh<>(filename.c_str());
+    nverts = m.num_verts();
+    VV.resize(nverts); // fill in Vertex-Vertex relation
+    for (auto i=0;i<nverts;i++) VV[i]=m.vert_ordered_verts_link(i);
+    // uncomment the following and adjust parameters if you want a smoother mesh
+    // MCF(m,12,1e-5,true);
+    m.normalize_bbox(); // rescale mesh to fit [0,1]^3 box
+    m.center_bbox();
+    m.show_wireframe(false);
+    m.updateGL();  
+    MESH_IS_LOADED = true;
+    FIELD_IS_PRESENT = false;
+    SCALE_SPACE_IS_PRESENT = false; 
+  }
+}
+
+void Save_scale_space()
+{
+  string filename = file_dialog_save();
+  ofstream f(filename.c_str());
+  // if (!f) {ImGui::OpenPopup("Output error"); return;}
+  f << nverts << " " << nlevels << endl;
+  for (uint i=0;i<nlevels;i++) {
+    for (uint j=0;j<nverts;j++) f << fields[i][j] << " ";
+    f << endl;
+  }
+  f.close();
+}
+
 
 // functions to  render vertices as spheres
 inline void draw_points(const vector<DrawableSphere> &cp, GLcanvas &gui) {
@@ -106,12 +146,31 @@ void Setup_GUI_Callbacks(GLcanvas & gui)
   gui.callback_app_controls = [&]() {
     ImGui::SeparatorText("Files");
     if (ImGui::Button("Load mesh")) {
-      string filename = file_dialog_open();
+      if (MESH_IS_LOADED) {
+        ImGui::OpenPopup("Load mesh?");
+      } else {
+        Load_mesh();
+      }
     }
+    // Modal popup for loading files
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center,ImGuiCond_Appearing,ImVec2(0.5f,0.5f));
+    if (ImGui::BeginPopupModal("Load mesh?", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
+    {
+      ImGui::Text("All data structures will be reset - Load mesh anyway?\n\n");
+      ImGui::Separator();           
+      static bool dont_ask_me_next_time = false;
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0,0));
+      ImGui::Checkbox("Don't ask me next time", &dont_ask_me_next_time);
+      ImGui::PopStyleVar();
+      if (ImGui::Button("OK", ImVec2(120,0))) {Load_mesh(); ImGui::CloseCurrentPopup();}
+      ImGui::SameLine();
+      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
+      ImGui::EndPopup();
+    }
+
     ImGui::SameLine();
-    if (ImGui::Button("Save scale-space")){
-      string filename = file_dialog_save();
-    }
+    if (ImGui::Button("Save scale-space")) Save_scale_space();
 
     ImGui::SeparatorText("Field");
 
@@ -460,7 +519,10 @@ int main(int argc, char **argv) {
   // uncomment the following and adjust parameters if you want a smoother mesh
   // MCF(m,12,1e-5,true);
   m.normalize_bbox(); // rescale mesh to fit [0,1]^3 box
-  m.updateGL();     
+  m.center_bbox();
+  m.show_wireframe(false);
+  m.updateGL();  
+  MESH_IS_LOADED = true;   
 
   // OUTPUT FIELDS::::::::::::::::::::::::::::::::
   nlevels = stoi(argv[2]); 
@@ -471,6 +533,7 @@ int main(int argc, char **argv) {
   // GENERATE FIELD:::::::::::::::::::::::::::::::
   // change this function if you want to generate a different field
   f = Generate_field(m);
+  FIELD_IS_PRESENT = true;
 
   // COMPUTE DISCRETE SCALE SPACE:::::::::::::::::
   cout << "Computing discrete scale space: ";
@@ -479,6 +542,7 @@ int main(int argc, char **argv) {
   vector<Eigen::VectorXd> efields = Build_disc_ss(m,f,nlevels,t_step,mult,true,true);
   for (auto i=0;i<efields.size();i++) // convert from Eigen to std::vector
     fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
+  SCALE_SPACE_IS_PRESENT = true;
   cout << "done"<< endl;
 
   for (auto i=0;i<nlevels;i++) // set clamp limits for visualization
@@ -507,7 +571,6 @@ int main(int argc, char **argv) {
 
   // render the mesh
   gui.push(&m);
-  m.show_wireframe(false);
- 
+  
   return gui.launch();
 }
