@@ -14,17 +14,18 @@ using namespace cinolib;
 //:::::::::::::::::::::::::::: GLOBAL VARIABLES (FOR GUI) ::::::::::::::::::::::::::::::
 // Global state
 enum field_methods {GAUSS, MEAN, L_EIGEN, COORDX, COORDY, COORDZ, RANDOM};
+const char * FIELD_METHOD_LABELS[] = {"Gaussian curvature", "Mean curvature", "Laplacian eigenfunction", "Coordinate x", "Coordinate y", "Coordinate z", "Random"};
 
 struct State {
   bool MESH_IS_LOADED, FIELD_IS_PRESENT, SCALE_SPACE_IS_PRESENT;
   // Input
-  string filename;               // name of input file
+  // string filename;                // name of input file
   DrawableTrimesh<> m;            // the input mesh
   uint nverts;                    // its #vertices
   vector<vector<uint>> VV;        // its VV relation
   // Output
   vector<vector<double>> fields;  // the discrete scale-space
-  uint nlevels;                   // # levels in the scale-space 
+  int nlevels;                   // # levels in the scale-space 
   vector<float*> clamp_limits;    // clamp limits for field visualization at all levels
   // Field generation
   Eigen::VectorXd f;              // base field on m
@@ -32,25 +33,38 @@ struct State {
   vector<string> field_method_labels; // labels for the combo box
   int max_eigenfunctions, selected_eigenfunction; // parameters for eigenfunction generator
   // Scale space
-  double t_step;                  // base time step of diffusion
-  double mult;                    // multiplicator/stride of time step in diffusion
+  int method;                     // 1 linear; 2 exponential
+  float t_step;                   // base time step of diffusion
+  int stride;                     // stride forl linear method
+  float mult;                     // multiplicator for exponential method
+  bool normalize;
   vector<vector<int>> critical;   // critical points at all levels
   // GUI
   int selected_entry;
   float curr_clamp[2];
-  bool show_sf, show_cp, show_m, show_wf;
+  bool show_cp, show_m, show_wf;
+  int show_field;                 // 0 no field; 1 base field; 2 scale-space field
   vector<DrawableSphere> points;          // spheres for rendering critical points
   float point_size, point_multiplier;     // base radius and multiplier of spheres
 
   State() {
     MESH_IS_LOADED = FIELD_IS_PRESENT = SCALE_SPACE_IS_PRESENT = false;
-    show_sf = show_cp = show_wf = false;
+    show_cp = show_wf = false;
     show_m = true;
+    show_field = 0;
     // field generation
+    f = Eigen::VectorXd(2); // init f to support clamp limits in gui
+    f(0)=0; f(1)=1;
     current_field_method = GAUSS;
-    field_method_labels = {"Gaussian curvature", "Mean curvature", "Laplacian eigenfunction", "Coordinate x", "Coordinate y", "Coordinate z", "Random"};
     max_eigenfunctions = 100;
     selected_eigenfunction = 1;
+    // scale-space
+    method = 1; //linear
+    t_step = 0.001;
+    stride = 10;
+    mult = 1.05;
+    normalize = true;
+    nlevels = 100;
     // view
     selected_entry = 0;
     point_multiplier = 1.0;
@@ -58,43 +72,6 @@ struct State {
 };
 
 //::::::::::::::::::::::::::::::::::::GUI utilities ::::::::::::::::::::::::::::::::::::
-
-void Load_mesh(State &gs)
-{
-  string filename = file_dialog_open();
-  if (filename.size()!=0) {
-    gs.m = DrawableTrimesh<>(filename.c_str());
-    gs.nverts = gs.m.num_verts();
-    gs.VV.resize(gs.nverts); // fill in Vertex-Vertex relation
-    for (auto i=0;i<gs.nverts;i++) gs.VV[i]=gs.m.vert_ordered_verts_link(i);
-    // uncomment the following and adjust parameters if you want a smoother mesh
-    // MCF(m,12,1e-5,true);
-    gs.m.normalize_bbox(); // rescale mesh to fit [0,1]^3 box
-    gs.m.center_bbox();
-    gs.m.show_wireframe(gs.show_wf);
-    gs.m.updateGL();  
-    gs.MESH_IS_LOADED = true;
-    gs.FIELD_IS_PRESENT = false;
-    gs.SCALE_SPACE_IS_PRESENT = false; 
-    gs.point_size = gs.m.edge_avg_length()/2; // set initial radius of spheres for critical points
-  }
-}
-
-void Save_scale_space(const State &gs)
-{
-  string filename = file_dialog_save();
-  if (filename.size()==0) return;
-  ofstream f(filename.c_str());
-  // if (!f) {ImGui::OpenPopup("Output error"); return;}
-  f << gs.nverts << " " << gs.nlevels << endl;
-  for (uint i=0;i<gs.nlevels;i++) {
-    for (uint j=0;j<gs.nverts;j++) f << gs.fields[i][j] << " ";
-    f << endl;
-  }
-  f.close();
-}
-
-//-------------
 // functions to  render vertices as spheres
 inline void draw_points(const vector<DrawableSphere> &cp, GLcanvas &gui) {
   for (auto &point : cp) //if (point.radius > 0) 
@@ -129,16 +106,6 @@ inline void reset_points(vector<DrawableSphere> &cp)
 }
 
 // ------------
-
-const char* wrap_strings(const vector<string> &s)
-{
-  string ss;
-  for (int i=0;i<s.size();i++) ss = ss + "\0" + s[i];
-  ss += "\0";
-  return ss.c_str();  
-}
-
-// ------------
 ScalarField Clamp_and_rescale_field(const vector<double> &f, const float cl[])
 // f field is in [0,1] both in input and in output
 // cl clamp limits: clamp f in [cl[0],cl[1]] and rescale it to [0,1]
@@ -153,8 +120,61 @@ ScalarField Clamp_and_rescale_field(const vector<double> &f, const float cl[])
   return sf;
 }
 
+//::::::::::::::::::::::::::::::::::::I/O ::::::::::::::::::::::::::::::::::::
 
+void Load_mesh(string filename, GLcanvas & gui, State &gs)
+{
+  gs.m = DrawableTrimesh<>(filename.c_str());
+  gs.nverts = gs.m.num_verts();
+  gs.VV.resize(gs.nverts); // fill in Vertex-Vertex relation
+  for (auto i=0;i<gs.nverts;i++) gs.VV[i]=gs.m.vert_ordered_verts_link(i);
+  // uncomment the following and adjust parameters if you want a smoother mesh
+  // MCF(m,12,1e-5,true);
+  gs.m.normalize_bbox(); // rescale mesh to fit [0,1]^3 box
+  gs.m.center_bbox();
+  gs.m.show_wireframe(gs.show_wf);
+  gs.m.show_mesh(gs.show_m);    
+  gs.m.updateGL();  
+  gs.point_size = gs.m.edge_avg_length()/2; // set initial radius of spheres for critical points
+  if (!gs.MESH_IS_LOADED) {
+    gui.push(&gs.m);
+    gs.MESH_IS_LOADED = true;
+  }
 
+  // reset field and scale-space
+  gs.f.resize(2); gs.f(0)=0; gs.f(1)=1.0; // init f to support clamp limits in gui
+  gs.show_field = 0;
+
+  if (gs.show_cp) {
+    remove_points(gs.points,gui);
+    gs.show_cp = false;
+  }
+
+  gs.clamp_limits = vector<float*>(1); // only entry zero for the base field
+  gs.clamp_limits[0] = new float[2];
+
+  gs.FIELD_IS_PRESENT = gs.SCALE_SPACE_IS_PRESENT = false; 
+}
+
+void Load_mesh(GLcanvas & gui, State &gs)
+{
+  string filename = file_dialog_open();
+  if (filename.size()!=0) Load_mesh(filename,gui,gs);
+}
+
+void Save_scale_space(const State &gs)
+{
+  string filename = file_dialog_save();
+  if (filename.size()==0) return;
+  ofstream f(filename.c_str());
+  // if (!f) {ImGui::OpenPopup("Output error"); return;}
+  f << gs.nverts << " " << gs.nlevels << endl;
+  for (uint i=0;i<gs.nlevels;i++) {
+    for (uint j=0;j<gs.nverts;j++) f << gs.fields[i][j] << " ";
+    f << endl;
+  }
+  f.close();
+}
 
 //====================== GENERAL UTILITIES =============================================
 
@@ -274,20 +294,6 @@ Eigen::VectorXd Random_field(const DrawableTrimesh<> & m)
 
 
 //=============================== INPUT FIELD ==================================
-void Generate_field(State & gs)
-{
-  switch(gs.current_field_method) {
-    case GAUSS: gs.f = gaussian_curvature(gs.m); break;
-    case MEAN: gs.f = Mean_curvature(gs.m); break;
-    case L_EIGEN: gs.f = Laplacian_eigenfunction(gs.m,gs.max_eigenfunctions,gs.selected_eigenfunction); break;
-    case COORDX:
-    case COORDY:
-    case COORDZ:
-    case RANDOM:
-    default: cout << "Bad case in switch - This shouldn't happen!\n";
-  }
-}
-
 void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]) 
 {
   // set clamp limits to sigma_multiplier * sigma
@@ -295,51 +301,41 @@ void Set_clamp_limits(const Eigen::VectorXd &f, int sigma_multiplier, float cl[]
   Eigen::VectorXd s(f);
   for (auto i=0;i<s.size();i++) s(i) = (s(i)-mean)*(s(i)-mean);
   double sigma = sqrt(s.sum()/s.size());
-  // cl[0] = mean - sigma_multiplier * sigma;
-  // cl[1] = mean + sigma_multiplier * sigma;
   cl[0] = std::max(mean - sigma_multiplier * sigma,f.minCoeff());
   cl[1] = std::min(mean + sigma_multiplier * sigma,f.maxCoeff());
-  // cout << "clamp limits: " << cl[0] << ", " << cl[1] << endl;
 }
 
-//=========================== PROCESSING FUNCTIONS =============================
-
-vector<Eigen::VectorXd> Build_disc_ss(const DrawableTrimesh<> &m, const Eigen::VectorXd &f, 
-                                            int levels, double time_scalar = 0.01, double mult = 1, 
-                                            bool linear = true, bool normalize = false) 
-// compute a discrete scale-space with "levels" levels from input field f on shape m
-// if linear applies diffusion flow levels * mult times with steady coefficient time_scalar
-// else applies diffusion flow "levels" times with exponentially increasing diffusion coefficient:
-// initial coefficient time_scalar is multiplied by mult at each iteration
-// cumulative smoothing: input field at iteration i is the smoothed field at iteration i-1
-// if normalize the result is normalizd in [0,1] at each iteration
+void Generate_field(GLcanvas & gui, State & gs)
 {
-  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
-  Eigen::SparseMatrix<double> MM = mass_matrix(m);
-  vector<Eigen::VectorXd> buf(levels);
-  Eigen::VectorXd f1(f);
-  if (normalize) normalize_in_01(f1);
-  buf[0]=f1;
-
-  if (linear) cout << "linear progression\n"; else cout << "exponential progression\n";
-
-  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-  for (auto i=1;i<levels;i++) {
-    // iterated backward Euler time integration of heat flow equation
-    if (linear) {
-      int nit = (int)mult;
-      for (int j=0;j<nit;j++) f1 = LLT.solve(MM * f1);
-      buf[i] = f1;
-    } else {
-      if (i>0) Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - time_scalar * L);
-      buf[i] = LLT.solve(MM * buf[i-1]);
-      time_scalar *= mult;
-    }
-    if (normalize) normalize_in_01(buf[i]);
-    cout << "level "<< i << " completed\n";
+  switch(gs.current_field_method) {
+    case GAUSS: gs.f = gaussian_curvature(gs.m); break;
+    case MEAN: gs.f = Mean_curvature(gs.m); break;
+    case L_EIGEN: gs.f = Laplacian_eigenfunction(gs.m,gs.max_eigenfunctions,gs.selected_eigenfunction); break;
+    case COORDX: gs.f = Coordinate(gs.m,0); break;
+    case COORDY: gs.f = Coordinate(gs.m,1); break;
+    case COORDZ: gs.f = Coordinate(gs.m,2); break;
+    case RANDOM: gs.f = Random_field(gs.m); break;
+    default: cout << "Bad case in switch - This shouldn't happen!\n";
   }
-  return buf;
+  Set_clamp_limits(gs.f, 2, gs.clamp_limits[0]);
+  gs.FIELD_IS_PRESENT = true;
+
+  if (gs.show_cp) {
+    remove_points(gs.points,gui);
+    gs.show_cp = false;
+  }
+  gs.SCALE_SPACE_IS_PRESENT = false;
+  if (gs.show_field==2) gs.show_field=1;
+  if (gs.show_field==1) {
+    gs.curr_clamp[0]=gs.clamp_limits[0][0];
+    gs.curr_clamp[1]=gs.clamp_limits[0][1];
+    ScalarField phi = Clamp_and_rescale_field(vector(gs.f.data(),gs.f.data()+gs.f.size()),gs.curr_clamp);
+    phi.copy_to_mesh(gs.m);
+    gs.m.show_texture1D(TEXTURE_1D_HSV);
+  }
 }
+
+//=========================== SCALE-SPACE FUNCTIONS =============================
 
 vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const vector<vector<uint>> &VV,
                                           const Eigen::VectorXd &f, vector<vector<int>> &ties)
@@ -391,6 +387,78 @@ void print_statistics(const vector<vector<int>> &c)
   }
 }
 
+void Build_disc_ss(GLcanvas &gui, State &gs)
+// compute a discrete scale-space with "levels" levels from input field f on shape m
+// if linear applies diffusion flow levels * mult times with steady coefficient time_scalar
+// else applies diffusion flow "levels" times with exponentially increasing diffusion coefficient:
+// initial coefficient time_scalar is multiplied by mult at each iteration
+// cumulative smoothing: input field at iteration i is the smoothed field at iteration i-1
+// if normalize the result is normalizd in [0,1] at each iteration
+{
+  Eigen::SparseMatrix<double> L  = laplacian(gs.m, COTANGENT);
+  Eigen::SparseMatrix<double> MM = mass_matrix(gs.m);
+  vector<Eigen::VectorXd> buf(gs.nlevels);
+  Eigen::VectorXd f1(gs.f);
+
+  float step = gs.t_step;
+  if (gs.normalize) normalize_in_01(f1);
+  buf[0]=f1;
+
+  cout << "Building scale-space - ";
+  if (gs.method == 1) cout << "linear progression\n"; else cout << "exponential progression\n";
+
+  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
+  for (auto i=1;i<gs.nlevels;i++) {
+    // iterated backward Euler time integration of heat flow equation
+    if (gs.method == 1) {
+      for (int j=0;j<gs.stride;j++) f1 = LLT.solve(MM * f1);
+      buf[i] = f1;
+    } else {
+      if (i>0) Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
+      buf[i] = LLT.solve(MM * buf[i-1]);
+      step *= gs.mult;
+    }
+    if (gs.normalize) normalize_in_01(buf[i]);
+    cout << "level "<< i << " completed\n";
+  }
+
+cout << "Convert fields\n";
+  gs.fields = vector<vector<double>>(gs.nlevels,vector<double>(gs.nverts));
+  for (auto i=0;i<buf.size();i++) // convert from Eigen to std::vector
+    gs.fields[i] = vector(buf[i].data(),buf[i].data()+buf[i].size());
+
+  // reset critical points in viewer
+  if (gs.show_cp) {
+cout << "Remove points\n";
+    remove_points(gs.points,gui);
+    gs.show_cp = false;
+  }
+
+cout << "Set clamp limits\n";
+  gs.clamp_limits = vector<float*>(gs.nlevels);
+  for (auto &l : gs.clamp_limits) l = new float[2];
+  for (auto i=0;i<gs.nlevels;i++) // set clamp limits for visualization
+    Set_clamp_limits(buf[i], 2, gs.clamp_limits[i]); 
+
+  cout << "Finding critical points: \n";
+  gs.critical = vector<vector<int>>(gs.nlevels,vector<int>(gs.nverts));
+  vector<vector<int>> ties; // "flat" edges
+  for (auto i=0;i<buf.size();i++) {
+    gs.critical[i] = Find_Critical_Points(gs.m,gs.VV,buf[i],ties);
+    if (ties.size()>0) {    // report ties, if any
+      cout << "Found ties at level " << i << ": ";
+      for (auto i=0;i<ties.size();i++) 
+        cout << "(" << ties[i][0] << "," << ties[i][1] << "), ";
+      cout << endl;
+    }
+    ties.resize(0);
+  }
+  print_statistics(gs.critical);
+  cout << "done"<< endl;
+
+  gs.SCALE_SPACE_IS_PRESENT = true;
+}
+
 
 //::::::::::::::::::::::::::::::::: GUI ::::::::::::::::::::::::::::::::::::::::::::::::
 
@@ -411,7 +479,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
       if (gs.MESH_IS_LOADED) {
         ImGui::OpenPopup("Load mesh?");
       } else {
-        Load_mesh(gs);
+        Load_mesh(gui,gs);
       }
     }
     // Modal popup for loading files
@@ -419,13 +487,14 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
     ImGui::SetNextWindowPos(center,ImGuiCond_Appearing,ImVec2(0.5f,0.5f));
     if (ImGui::BeginPopupModal("Load mesh?", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
     {
-      ImGui::Text("All data structures will be reset - Load mesh anyway?\n\n");
-      ImGui::Separator();           
       static bool dont_ask_me_next_time = false;
+      if (dont_ask_me_next_time) {Load_mesh(gui,gs); ImGui::CloseCurrentPopup();}
+      ImGui::Text("All data structures will be reset - Load anyway?\n\n");
+      ImGui::Separator();           
       ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0,0));
       ImGui::Checkbox("Don't ask me next time", &dont_ask_me_next_time);
       ImGui::PopStyleVar();
-      if (ImGui::Button("OK", ImVec2(120,0))) {Load_mesh(gs); ImGui::CloseCurrentPopup();}
+      if (ImGui::Button("OK", ImVec2(120,0))) {Load_mesh(gui,gs); ImGui::CloseCurrentPopup();}
       ImGui::SameLine();
       if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
       ImGui::EndPopup();
@@ -435,71 +504,154 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
 
     // Field
     ImGui::SeparatorText("Field");
-    ImGui::Combo("Method",&gs.current_field_method,wrap_strings(gs.field_method_labels));
-    if (ImGui::Button("Generate field")) Generate_field(gs);
+    ImGui::Combo("Method",&gs.current_field_method,FIELD_METHOD_LABELS,IM_ARRAYSIZE(FIELD_METHOD_LABELS));
+    ImGui::Text("Eigenfunctions:");
+    ImGui::PushItemWidth(100);
+    ImGui::InputInt("Max",&gs.max_eigenfunctions,1,100); ImGui::SameLine(200);
+    ImGui::InputInt("Selected",&gs.selected_eigenfunction,1,100);
+    ImGui::PopItemWidth();
+      if (ImGui::Button("Generate field")) {
+      if (!gs.MESH_IS_LOADED) 
+        ImGui::OpenPopup("No mesh!");
+      else if (!gs.FIELD_IS_PRESENT) 
+        Generate_field(gui,gs);
+      else ImGui::OpenPopup("Generate field?"); 
+    }
+    // Modal popup for generating field
+    if (ImGui::BeginPopupModal("Generate field?", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
+    {
+      static bool dont_ask_me_next_time = false;
+      if (dont_ask_me_next_time) {Generate_field(gui,gs); ImGui::CloseCurrentPopup();}
+      ImGui::Text("Field and scale-space will be reset - Generate anyway?\n\n");
+      ImGui::Separator();           
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0,0));
+      ImGui::Checkbox("Don't ask me next time", &dont_ask_me_next_time);
+      ImGui::PopStyleVar();
+      if (ImGui::Button("OK", ImVec2(120,0))) {Generate_field(gui,gs); ImGui::CloseCurrentPopup();}
+      ImGui::SameLine();
+      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
+      ImGui::EndPopup();
+    }
+    // Alert popup
+    if (ImGui::BeginPopupModal("No mesh!", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
+    {
+      ImGui::Text("No mesh loaded! - Cannot generate field\n\n");
+      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
+      ImGui::EndPopup();
+    }
 
     // Processing
-    ImGui::SeparatorText("Processing");
+    ImGui::SeparatorText("Scale-space");
+    ImGui::Text("Progression: "); ImGui::SameLine(100);
+    ImGui::RadioButton("Linear",&gs.method,1); ImGui::SameLine();
+    ImGui::RadioButton("Exponential",&gs.method,2); ImGui::SameLine(282); 
+    ImGui::Checkbox("Normalize", &gs.normalize);
+    ImGui::PushItemWidth(100);
+    ImGui::InputInt("Levels",&gs.nlevels,1,10); ImGui::SameLine(200);
+    ImGui::InputFloat("Time step",&gs.t_step,0.0001,0.001,"%.6f");
+    ImGui::InputInt("Stride (lin)",&gs.stride,1,10); ImGui::SameLine(200);
+    ImGui::InputFloat("Mult. (exp)",&gs.mult,0.001,0.01,"%.3f");
+    ImGui::PopItemWidth();
+    if (ImGui::Button("Compute scale-space")) {
+      if (!gs.FIELD_IS_PRESENT) 
+        ImGui::OpenPopup("No field!");
+      else if (!gs.SCALE_SPACE_IS_PRESENT) 
+        Build_disc_ss(gui,gs);
+      else ImGui::OpenPopup("Build scale-space?"); 
+    }
+    // Modal popup for generating scale-space
+    if (ImGui::BeginPopupModal("Build scale-space?", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
+    {
+      static bool dont_ask_me_next_time = false;
+      if (dont_ask_me_next_time) {Build_disc_ss(gui,gs); ImGui::CloseCurrentPopup();}
+      ImGui::Text("Scale-space will be reset - Build anyway?\n\n");
+      ImGui::Separator();           
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0,0));
+      ImGui::Checkbox("Don't ask me next time", &dont_ask_me_next_time);
+      ImGui::PopStyleVar();
+      if (ImGui::Button("OK", ImVec2(120,0))) {Build_disc_ss(gui,gs); ImGui::CloseCurrentPopup();}
+      ImGui::SameLine();
+      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
+      ImGui::EndPopup();
+    }
+    // Alert popup
+    if (ImGui::BeginPopupModal("No field!", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
+    {
+      ImGui::Text("No field present! - Cannot build scale-space\n\n");
+      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
+      ImGui::EndPopup();
+    }
 
     // View
     ImGui::SeparatorText("View");
     if (ImGui::Checkbox("Show wireframe", &gs.show_wf)) {
       if (gs.show_wf) gs.m.show_wireframe(true);
       else gs.m.show_wireframe(false);
-      gs.m.updateGL();
+      if (gs.MESH_IS_LOADED) gs.m.updateGL();
     } 
     ImGui::SameLine();
     if (ImGui::Checkbox("Show mesh", &gs.show_m)) {
       if (gs.show_m) gs.m.show_mesh(true);
       else gs.m.show_mesh(false);
-      gs.m.updateGL();
+      if (gs.MESH_IS_LOADED) gs.m.updateGL();
+    }
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Show Critical Points", &gs.show_cp)) {
+      if (gs.SCALE_SPACE_IS_PRESENT && gs.show_cp) {
+        set_points(gs.m,gs.critical[gs.selected_entry],gs.points,gs.point_size*gs.point_multiplier);
+        draw_points(gs.points,gui);
+      } else if (gs.SCALE_SPACE_IS_PRESENT && !gs.show_cp)
+        remove_points(gs.points,gui);
+      else gs.show_cp = false;
     } 
-    if (ImGui::Checkbox("Show Scalar Field", &gs.show_sf)) {
-      if (gs.show_sf) {
+
+    ImGui::Text("Show field: "); ImGui::SameLine(100);
+    if (ImGui::RadioButton("None",&gs.show_field,0)) gs.m.show_poly_color();
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Base",&gs.show_field,1) && gs.FIELD_IS_PRESENT) {
+        gs.curr_clamp[0]=gs.clamp_limits[0][0];
+        gs.curr_clamp[1]=gs.clamp_limits[0][1];
+        ScalarField phi = Clamp_and_rescale_field(vector(gs.f.data(),gs.f.data()+gs.f.size()),gs.curr_clamp);
+        phi.copy_to_mesh(gs.m);
+        gs.m.show_texture1D(TEXTURE_1D_HSV);
+    }  
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Scale-space",&gs.show_field,2) && gs.SCALE_SPACE_IS_PRESENT) {
         gs.curr_clamp[0]=gs.clamp_limits[gs.selected_entry][0];
         gs.curr_clamp[1]=gs.clamp_limits[gs.selected_entry][1];
         ScalarField phi = Clamp_and_rescale_field(gs.fields[gs.selected_entry],gs.curr_clamp);
         phi.copy_to_mesh(gs.m);
         gs.m.show_texture1D(TEXTURE_1D_HSV);
-      } else {
-        gs.m.show_poly_color();
-      }
-    } 
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Show Critical Points", &gs.show_cp)) {
-      if (gs.show_cp) {
-        set_points(gs.m,gs.critical[gs.selected_entry],gs.points,gs.point_size*gs.point_multiplier);
-        draw_points(gs.points,gui);
-      } else 
-        remove_points(gs.points,gui);
-      // m.updateGL();
-    } 
+    }
+
     if (ImGui::SliderFloat("Point size", &gs.point_multiplier, 0, 10.0, "%.1f")) {
-      if (gs.show_cp) {
+      if (gs.show_cp && gs.SCALE_SPACE_IS_PRESENT) {
         set_points(gs.m,gs.critical[gs.selected_entry],gs.points,gs.point_size*gs.point_multiplier);
-        gs.m.updateGL();
+        // gs.m.updateGL();
       }
     }
     if (ImGui::SliderFloat2("Clamp values", gs.curr_clamp, gs.f.minCoeff(), gs.f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
-  //  if (ImGui::InputFloat2("Clamp values", curr_clamp,"%.4f")) {
-      if (gs.show_sf) {
+       if (gs.show_field==1 && gs.FIELD_IS_PRESENT) {
+        ScalarField phi = Clamp_and_rescale_field(vector(gs.f.data(),gs.f.data()+gs.f.size()),gs.curr_clamp);
+        phi.copy_to_mesh(gs.m);
+        gs.m.updateGL();
+      } else if (gs.show_field == 2 && gs.SCALE_SPACE_IS_PRESENT) {
         ScalarField phi = Clamp_and_rescale_field(gs.fields[gs.selected_entry],gs.curr_clamp);
         phi.copy_to_mesh(gs.m);
         gs.m.updateGL();
       }
     }
-    // if (ImGui::SliderInt("Choose level", &selected_entry, 0, nlevels - 1)) {
     if (ImGui::InputInt("Level", &gs.selected_entry)) {
       if (gs.selected_entry>=gs.nlevels) gs.selected_entry = gs.nlevels-1;
       else {
-        if (gs.show_sf) {
+        if (gs.show_field==2 && gs.SCALE_SPACE_IS_PRESENT) {
           gs.curr_clamp[0]=gs.clamp_limits[gs.selected_entry][0];
           gs.curr_clamp[1]=gs.clamp_limits[gs.selected_entry][1];
           ScalarField phi = Clamp_and_rescale_field(gs.fields[gs.selected_entry],gs.curr_clamp);
           phi.copy_to_mesh(gs.m);
           gs.m.updateGL();
         }
-        if (gs.show_cp) {
+        if (gs.show_cp && gs.SCALE_SPACE_IS_PRESENT) {
           remove_points(gs.points,gui);
           set_points(gs.m,gs.critical[gs.selected_entry],gs.points,gs.point_size*gs.point_multiplier);
           draw_points(gs.points,gui);
@@ -529,72 +681,24 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
 //=============================== MAIN =========================================
 
 int main(int argc, char **argv) {
-  if (argc<4) {cout << "Usage: Mesh_scale_space filename num_levels time_step multiplier/stride\n"; return 1;}
 
-  //SETUP GLOBAL STATE::::::::::::::::::::::::::::
+  //SETUP GLOBAL STATE AND GUI:::::::::::::::::::::::
   State gs;
-
-  //INPUT MESH::::::::::::::::::::::::::::::::::::
-  string s = "../data/" + string(argv[1]);
-  gs.m = DrawableTrimesh<>(s.c_str());
-  gs.nverts = gs.m.num_verts();
-  gs.VV.resize(gs.nverts); // fill in Vertex-Vertex relation
-  for (auto i=0;i<gs.nverts;i++) gs.VV[i]=gs.m.vert_ordered_verts_link(i);
-  // uncomment the following and adjust parameters if you want a smoother mesh
-  // MCF(m,12,1e-5,true);
-  gs.m.normalize_bbox(); // rescale mesh to fit [0,1]^3 box
-  gs.m.center_bbox();
-  gs.m.show_wireframe(false);
-  gs.m.updateGL();  
-  gs.point_size = gs.m.edge_avg_length()/2; // set initial radius of spheres for critical points
-  gs.MESH_IS_LOADED = true;   
-
-  // OUTPUT FIELDS::::::::::::::::::::::::::::::::
-  gs.nlevels = stoi(argv[2]); 
-  gs.fields = vector<vector<double>>(gs.nlevels,vector<double>(gs.nverts));
-  gs.clamp_limits = vector<float*>(gs.nlevels);
-  for (auto &l : gs.clamp_limits) l = new float[2];
-
-  // GENERATE FIELD:::::::::::::::::::::::::::::::
-  // change this function if you want to generate a different field
-  Generate_field(gs);
-
-  // COMPUTE DISCRETE SCALE SPACE:::::::::::::::::
-  cout << "Computing discrete scale space: ";
-  gs.t_step = stod(argv[3]);
-  gs.mult = stod(argv[4]);
-  vector<Eigen::VectorXd> efields = Build_disc_ss(gs.m,gs.f,gs.nlevels,gs.t_step,gs.mult,true,true);
-  for (auto i=0;i<efields.size();i++) // convert from Eigen to std::vector
-    gs.fields[i] = vector(efields[i].data(),efields[i].data()+efields[i].size());
-  gs.SCALE_SPACE_IS_PRESENT = true;
-  cout << "done"<< endl;
-
-  for (auto i=0;i<gs.nlevels;i++) // set clamp limits for visualization
-    Set_clamp_limits(efields[i], 2, gs.clamp_limits[i]); 
-
-  cout << "Finding critical points: \n";
-  gs.critical = vector<vector<int>>(gs.nlevels,vector<int>(gs.nverts));
-  vector<vector<int>> ties; // "flat" edges
-  for (auto i=0;i<efields.size();i++) {
-    gs.critical[i] = Find_Critical_Points(gs.m,gs.VV,efields[i],ties);
-    if (ties.size()>0) {    // report ties, if any
-      cout << "Found ties at level " << i << ": ";
-      for (auto i=0;i<ties.size();i++) 
-        cout << "(" << ties[i][0] << "," << ties[i][1] << "), ";
-      cout << endl;
-    }
-    ties.resize(0);
-  }
-  cout << "done"<< endl;
-  print_statistics(gs.critical);
-
-
-  // setup GUI
   GLcanvas gui = Init_GUI();
   Setup_GUI_Callbacks(gui,gs);
 
+  //Load mesh
+  if (argc>1) {
+    string s = "../data/" + string(argv[1]);
+    Load_mesh(s,gui,gs);
+  }
+
+  // // // GENERATE FIELD:::::::::::::::::::::::::::::::
+  // Generate_field(gui,gs);
+
+  // // COMPUTE DISCRETE SCALE SPACE:::::::::::::::::
+  // Build_disc_ss(gui,gs);
+
   // render the mesh
-  gui.push(&gs.m);
-  
   return gui.launch();
 }
