@@ -17,57 +17,59 @@ enum field_methods {GAUSS, MEAN, L_EIGEN, COORDX, COORDY, COORDZ, RANDOM};
 const char * FIELD_METHOD_LABELS[] = {"Gaussian curvature", "Mean curvature", "Laplacian eigenfunction", "Coordinate x", "Coordinate y", "Coordinate z", "Random"};
 
 struct State {
+  // Program state ::::::::::::::::::::::::::::::::::::::::::::::::::::::
   bool MESH_IS_LOADED, FIELD_IS_PRESENT, SCALE_SPACE_IS_PRESENT;
   // Input
-  // string filename;                // name of input file
   DrawableTrimesh<> m;            // the input mesh
   uint nverts;                    // its #vertices
   vector<vector<uint>> VV;        // its VV relation
-  // Output
-  vector<vector<double>> fields;  // the discrete scale-space
-  int nlevels;                   // # levels in the scale-space 
-  vector<float*> clamp_limits;    // clamp limits for field visualization at all levels
-  // Field generation
+  // Field
   Eigen::VectorXd f;              // base field on m
+  // Scale-space
+  vector<vector<double>> fields;  // the discrete scale-space
+  vector<vector<int>> critical;   // critical points at all levels
+  vector<DrawableSphere> points;  // spheres for rendering critical points
+  float point_size;               // base radius of spheres
+  // GUI state ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  // Field
   int current_field_method;       // current method to generate the field
-  vector<string> field_method_labels; // labels for the combo box
   int max_eigenfunctions, selected_eigenfunction; // parameters for eigenfunction generator
   // Scale space
   int method;                     // 1 linear; 2 exponential
+  bool normalize;                 // fields are normalized at all levels during diffusion
+  int nlevels;                    // # levels in the scale-space 
   float t_step;                   // base time step of diffusion
-  int stride;                     // stride forl linear method
+  int stride;                     // stride for linear method
   float mult;                     // multiplicator for exponential method
-  bool normalize;
-  vector<vector<int>> critical;   // critical points at all levels
-  // GUI
-  int selected_entry;
-  float curr_clamp[2];
-  bool show_cp, show_m, show_wf;
-  int show_field;                 // 0 no field; 1 base field; 2 scale-space field
-  vector<DrawableSphere> points;          // spheres for rendering critical points
-  float point_size, point_multiplier;     // base radius and multiplier of spheres
+  // View
+  bool show_m, show_wf, show_cp;  // show mesh, wire-frame, critical points
+  int show_field;                 // field to show: 0 no field; 1 base field; 2 scale-space field
+  float point_multiplier;         // multiplier of sphere radius
+  vector<float*> clamp_limits;    // clamp limits for field visualization at all levels
+  float curr_clamp[2];            // current clamp limits
+  int selected_entry;             // selected level for visualization
 
   State() {
     MESH_IS_LOADED = FIELD_IS_PRESENT = SCALE_SPACE_IS_PRESENT = false;
-    show_cp = show_wf = false;
-    show_m = true;
-    show_field = 0;
     // field generation
-    f = Eigen::VectorXd(2); // init f to support clamp limits in gui
-    f(0)=0; f(1)=1;
     current_field_method = GAUSS;
     max_eigenfunctions = 100;
     selected_eigenfunction = 1;
     // scale-space
     method = 1; //linear
+    normalize = true;
+    nlevels = 100;
     t_step = 0.001;
     stride = 10;
     mult = 1.05;
-    normalize = true;
-    nlevels = 100;
     // view
-    selected_entry = 0;
+    show_m = true;
+    show_cp = show_wf = false;
+    show_field = 0;
     point_multiplier = 1.0;
+    f.resize(2); f(0)=0.0; f(1)=1.0;  // init f to support clamp limits in gui
+    curr_clamp[0]=0.0; curr_clamp[1]=1.0;
+    selected_entry = 0;
   }
 };
 
@@ -142,7 +144,8 @@ void Load_mesh(string filename, GLcanvas & gui, State &gs)
   }
 
   // reset field and scale-space
-  gs.f.resize(2); gs.f(0)=0; gs.f(1)=1.0; // init f to support clamp limits in gui
+  gs.f.resize(2); gs.f(0)=0.0; gs.f(1)=1.0; // init f to support clamp limits in gui
+  gs.curr_clamp[0]=0.0; gs.curr_clamp[1]=1.0;
   gs.show_field = 0;
 
   if (gs.show_cp) {
@@ -168,7 +171,7 @@ void Save_scale_space(const State &gs)
   if (filename.size()==0) return;
   ofstream f(filename.c_str());
   // if (!f) {ImGui::OpenPopup("Output error"); return;}
-  f << gs.nverts << " " << gs.nlevels << endl;
+  f << gs.nverts << " " << gs.fields.size() << endl;
   for (uint i=0;i<gs.nlevels;i++) {
     for (uint j=0;j<gs.nverts;j++) f << gs.fields[i][j] << " ";
     f << endl;
@@ -346,6 +349,7 @@ vector<int> Find_Critical_Points(const DrawableTrimesh<> &m, const vector<vector
 {
   vector<int> buf(f.size());
   uint nv = m.num_verts();
+  ties.resize(0);
   for(uint vid=0; vid<nv; vid++) {
     vector<uint> neigh = VV[vid];
     int nn = neigh.size();
@@ -422,25 +426,21 @@ void Build_disc_ss(GLcanvas &gui, State &gs)
     cout << "level "<< i << " completed\n";
   }
 
-cout << "Convert fields\n";
   gs.fields = vector<vector<double>>(gs.nlevels,vector<double>(gs.nverts));
   for (auto i=0;i<buf.size();i++) // convert from Eigen to std::vector
     gs.fields[i] = vector(buf[i].data(),buf[i].data()+buf[i].size());
 
   // reset critical points in viewer
   if (gs.show_cp) {
-cout << "Remove points\n";
     remove_points(gs.points,gui);
     gs.show_cp = false;
   }
 
-cout << "Set clamp limits\n";
   gs.clamp_limits = vector<float*>(gs.nlevels);
   for (auto &l : gs.clamp_limits) l = new float[2];
   for (auto i=0;i<gs.nlevels;i++) // set clamp limits for visualization
     Set_clamp_limits(buf[i], 2, gs.clamp_limits[i]); 
 
-  cout << "Finding critical points: \n";
   gs.critical = vector<vector<int>>(gs.nlevels,vector<int>(gs.nverts));
   vector<vector<int>> ties; // "flat" edges
   for (auto i=0;i<buf.size();i++) {
@@ -451,7 +451,6 @@ cout << "Set clamp limits\n";
         cout << "(" << ties[i][0] << "," << ties[i][1] << "), ";
       cout << endl;
     }
-    ties.resize(0);
   }
   print_statistics(gs.critical);
   cout << "done"<< endl;
@@ -584,17 +583,17 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
 
     // View
     ImGui::SeparatorText("View");
-    if (ImGui::Checkbox("Show wireframe", &gs.show_wf)) {
-      if (gs.show_wf) gs.m.show_wireframe(true);
-      else gs.m.show_wireframe(false);
-      if (gs.MESH_IS_LOADED) gs.m.updateGL();
-    } 
-    ImGui::SameLine();
     if (ImGui::Checkbox("Show mesh", &gs.show_m)) {
       if (gs.show_m) gs.m.show_mesh(true);
       else gs.m.show_mesh(false);
       if (gs.MESH_IS_LOADED) gs.m.updateGL();
     }
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Show wireframe", &gs.show_wf)) {
+      if (gs.show_wf) gs.m.show_wireframe(true);
+      else gs.m.show_wireframe(false);
+      if (gs.MESH_IS_LOADED) gs.m.updateGL();
+    } 
     ImGui::SameLine();
     if (ImGui::Checkbox("Show Critical Points", &gs.show_cp)) {
       if (gs.SCALE_SPACE_IS_PRESENT && gs.show_cp) {
@@ -630,7 +629,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
         // gs.m.updateGL();
       }
     }
-    if (ImGui::SliderFloat2("Clamp values", gs.curr_clamp, gs.f.minCoeff(), gs.f.maxCoeff(),"%.4f",ImGuiSliderFlags_Logarithmic)) {
+    if (ImGui::SliderFloat2("Clamp values", gs.curr_clamp, gs.f.minCoeff(), gs.f.maxCoeff(),"%.6f",ImGuiSliderFlags_Logarithmic)) {
        if (gs.show_field==1 && gs.FIELD_IS_PRESENT) {
         ScalarField phi = Clamp_and_rescale_field(vector(gs.f.data(),gs.f.data()+gs.f.size()),gs.curr_clamp);
         phi.copy_to_mesh(gs.m);
@@ -642,7 +641,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
       }
     }
     if (ImGui::InputInt("Level", &gs.selected_entry)) {
-      if (gs.selected_entry>=gs.nlevels) gs.selected_entry = gs.nlevels-1;
+      if (gs.selected_entry>=gs.fields.size()) gs.selected_entry = gs.fields.size()-1;
       else {
         if (gs.show_field==2 && gs.SCALE_SPACE_IS_PRESENT) {
           gs.curr_clamp[0]=gs.clamp_limits[gs.selected_entry][0];
