@@ -281,6 +281,7 @@ Eigen::VectorXd Laplacian_eigenfunction(State &gs)
     vector<double> f_max;
     Eigen::SparseMatrix<double> L = laplacian(gs.m, COTANGENT);
     matrix_eigenfunctions(L, true, gs.max_eigenfunctions, gs.eigenfunctions, f_min, f_max);
+    gs.EIGENFUNCTIONS_COMPUTED = true;
     cout << "done!\n";
   }
   for (auto i=0;i<nv;i++) 
@@ -335,6 +336,7 @@ void Generate_field(GLcanvas & gui, State & gs)
     case RANDOM: gs.f = Random_field(gs.m); break;
     default: cout << "Bad case in switch - This shouldn't happen!\n";
   }
+  if (gs.normalize) normalize_in_01(gs.f);
   Set_clamp_limits(gs.f, 2, gs.clamp_limits[0]);
   gs.FIELD_IS_PRESENT = true;
 
@@ -514,15 +516,17 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
       ImGui::EndPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Save scale-space")) 
+    if (ImGui::Button("Save scale-space")) {
       if (!gs.SCALE_SPACE_IS_PRESENT) 
         ImGui::OpenPopup("No data!");
       else Save_scale_space(gs);
+    }
     ImGui::SameLine();
-    if (ImGui::Button("Export critical points")) 
+    if (ImGui::Button("Export critical points")) {
       if (!gs.SCALE_SPACE_IS_PRESENT || gs.selected_entry>gs.critical.size()) 
         ImGui::OpenPopup("No data!");
       else Export_critical_points(gs);
+    }
 
     // Alert popup
     if (ImGui::BeginPopupModal("No data!", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
