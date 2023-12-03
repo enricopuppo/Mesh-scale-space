@@ -18,13 +18,14 @@ const char * FIELD_METHOD_LABELS[] = {"Gaussian curvature", "Mean curvature", "L
 
 struct State {
   // Program state ::::::::::::::::::::::::::::::::::::::::::::::::::::::
-  bool MESH_IS_LOADED, FIELD_IS_PRESENT, SCALE_SPACE_IS_PRESENT;
+  bool MESH_IS_LOADED, FIELD_IS_PRESENT, SCALE_SPACE_IS_PRESENT, EIGENFUNCTIONS_COMPUTED;
   // Input
   DrawableTrimesh<> m;            // the input mesh
   uint nverts;                    // its #vertices
   vector<vector<uint>> VV;        // its VV relation
   // Field
   Eigen::VectorXd f;              // base field on m
+  vector<double> eigenfunctions;  // eigenfunctions of f as computed by SPECTRA
   // Scale-space
   vector<vector<double>> fields;  // the discrete scale-space
   vector<vector<int>> critical;   // critical points at all levels
@@ -51,6 +52,7 @@ struct State {
 
   State() {
     MESH_IS_LOADED = FIELD_IS_PRESENT = SCALE_SPACE_IS_PRESENT = false;
+    EIGENFUNCTIONS_COMPUTED = false;
     // field generation
     current_field_method = GAUSS;
     max_eigenfunctions = 100;
@@ -170,12 +172,22 @@ void Save_scale_space(const State &gs)
   string filename = file_dialog_save();
   if (filename.size()==0) return;
   ofstream f(filename.c_str());
-  // if (!f) {ImGui::OpenPopup("Output error"); return;}
   f << gs.nverts << " " << gs.fields.size() << endl;
   for (uint i=0;i<gs.nlevels;i++) {
     for (uint j=0;j<gs.nverts;j++) f << gs.fields[i][j] << " ";
     f << endl;
   }
+  f.close();
+}
+
+void Export_critical_points(const State &gs)
+{
+  string filename = file_dialog_save();
+  if (filename.size()==0) return;
+  ofstream f(filename.c_str());
+  for (uint i=0;i<gs.nverts;i++)
+    if (gs.critical[gs.selected_entry][i]!=-1) 
+      f << gs.critical[gs.selected_entry][i] << " " << i << endl;
   f.close();
 }
 
@@ -257,19 +269,22 @@ Eigen::VectorXd Mean_curvature(const DrawableTrimesh<> & m)
 }
 
 // Eigenfunctions of the Laplacian
-Eigen::VectorXd Laplacian_eigenfunction(const DrawableTrimesh<> & m, int maxe, int k)
+Eigen::VectorXd Laplacian_eigenfunction(State &gs)
 // compute maxe eigenfunctions and return the k-th
 // warning: result changes depending on the value of maxe>=k
 {
-  uint nv = m.num_verts();
-  vector<double> eig;
-  vector<double> f_min;
-  vector<double> f_max;
-  Eigen::SparseMatrix<double> L = laplacian(m, COTANGENT);
-  matrix_eigenfunctions(L, true, maxe, eig, f_min, f_max);
+  uint nv = gs.m.num_verts();
   Eigen::VectorXd buf(nv);
+  if (!gs.EIGENFUNCTIONS_COMPUTED || gs.eigenfunctions.size() < nv*gs.max_eigenfunctions) {
+    cout << "Computing eigenfunctions\n";
+    vector<double> f_min;
+    vector<double> f_max;
+    Eigen::SparseMatrix<double> L = laplacian(gs.m, COTANGENT);
+    matrix_eigenfunctions(L, true, gs.max_eigenfunctions, gs.eigenfunctions, f_min, f_max);
+    cout << "done!\n";
+  }
   for (auto i=0;i<nv;i++) 
-    buf[i]=eig[(k-1)*nv+i]; 
+    buf[i]=gs.eigenfunctions[gs.selected_eigenfunction*nv+i]; 
   return buf;
 }
 
@@ -313,7 +328,7 @@ void Generate_field(GLcanvas & gui, State & gs)
   switch(gs.current_field_method) {
     case GAUSS: gs.f = gaussian_curvature(gs.m); break;
     case MEAN: gs.f = Mean_curvature(gs.m); break;
-    case L_EIGEN: gs.f = Laplacian_eigenfunction(gs.m,gs.max_eigenfunctions,gs.selected_eigenfunction); break;
+    case L_EIGEN: gs.f = Laplacian_eigenfunction(gs); break;
     case COORDX: gs.f = Coordinate(gs.m,0); break;
     case COORDY: gs.f = Coordinate(gs.m,1); break;
     case COORDZ: gs.f = Coordinate(gs.m,2); break;
@@ -499,7 +514,23 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
       ImGui::EndPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Save scale-space")) Save_scale_space(gs);
+    if (ImGui::Button("Save scale-space")) 
+      if (!gs.SCALE_SPACE_IS_PRESENT) 
+        ImGui::OpenPopup("No data!");
+      else Save_scale_space(gs);
+    ImGui::SameLine();
+    if (ImGui::Button("Export critical points")) 
+      if (!gs.SCALE_SPACE_IS_PRESENT || gs.selected_entry>gs.critical.size()) 
+        ImGui::OpenPopup("No data!");
+      else Export_critical_points(gs);
+
+    // Alert popup
+    if (ImGui::BeginPopupModal("No data!", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
+    {
+      ImGui::Text("No data available! - Cannot perform this task\n\n");
+      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
+      ImGui::EndPopup();
+    }
 
     // Field
     ImGui::SeparatorText("Field");
@@ -511,7 +542,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
     ImGui::PopItemWidth();
       if (ImGui::Button("Generate field")) {
       if (!gs.MESH_IS_LOADED) 
-        ImGui::OpenPopup("No mesh!");
+        ImGui::OpenPopup("No data!");
       else if (!gs.FIELD_IS_PRESENT) 
         Generate_field(gui,gs);
       else ImGui::OpenPopup("Generate field?"); 
@@ -531,13 +562,6 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
       if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
       ImGui::EndPopup();
     }
-    // Alert popup
-    if (ImGui::BeginPopupModal("No mesh!", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
-    {
-      ImGui::Text("No mesh loaded! - Cannot generate field\n\n");
-      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
-      ImGui::EndPopup();
-    }
 
     // Processing
     ImGui::SeparatorText("Scale-space");
@@ -553,7 +577,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
     ImGui::PopItemWidth();
     if (ImGui::Button("Compute scale-space")) {
       if (!gs.FIELD_IS_PRESENT) 
-        ImGui::OpenPopup("No field!");
+        ImGui::OpenPopup("No data!");
       else if (!gs.SCALE_SPACE_IS_PRESENT) 
         Build_disc_ss(gui,gs);
       else ImGui::OpenPopup("Build scale-space?"); 
@@ -570,13 +594,6 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
       ImGui::PopStyleVar();
       if (ImGui::Button("OK", ImVec2(120,0))) {Build_disc_ss(gui,gs); ImGui::CloseCurrentPopup();}
       ImGui::SameLine();
-      if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
-      ImGui::EndPopup();
-    }
-    // Alert popup
-    if (ImGui::BeginPopupModal("No field!", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse))
-    {
-      ImGui::Text("No field present! - Cannot build scale-space\n\n");
       if (ImGui::Button("Cancel", ImVec2(120,0))) {ImGui::CloseCurrentPopup();}
       ImGui::EndPopup();
     }
