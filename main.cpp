@@ -25,6 +25,7 @@ struct State {
   vector<vector<uint>> VV;        // its VV relation
   // Field
   Eigen::VectorXd f;              // base field on m
+  float f_clamp[2];               // clamp limits of base field
   vector<double> eigenfunctions;  // eigenfunctions of f as computed by SPECTRA
   // Scale-space
   vector<vector<double>> fields;  // the discrete scale-space
@@ -34,6 +35,7 @@ struct State {
   // GUI state ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   // Field
   int current_field_method;       // current method to generate the field
+  bool normalize_f;               // base field is normalized
   int max_eigenfunctions, selected_eigenfunction; // parameters for eigenfunction generator
   // Scale space
   int method;                     // 1 linear; 2 exponential
@@ -55,8 +57,10 @@ struct State {
     EIGENFUNCTIONS_COMPUTED = false;
     // field generation
     current_field_method = GAUSS;
+    normalize_f = false;
     max_eigenfunctions = 100;
     selected_eigenfunction = 1;
+    f_clamp[0] = 0; f_clamp[1] = 1;
     // scale-space
     method = 1; //linear
     normalize = true;
@@ -158,7 +162,7 @@ void Load_mesh(string filename, GLcanvas & gui, State &gs)
   gs.clamp_limits = vector<float*>(1); // only entry zero for the base field
   gs.clamp_limits[0] = new float[2];
 
-  gs.FIELD_IS_PRESENT = gs.SCALE_SPACE_IS_PRESENT = false; 
+  gs.FIELD_IS_PRESENT = gs.SCALE_SPACE_IS_PRESENT = gs.EIGENFUNCTIONS_COMPUTED = false; 
 }
 
 void Load_mesh(GLcanvas & gui, State &gs)
@@ -276,7 +280,7 @@ Eigen::VectorXd Laplacian_eigenfunction(State &gs)
   uint nv = gs.m.num_verts();
   Eigen::VectorXd buf(nv);
   if (!gs.EIGENFUNCTIONS_COMPUTED || gs.eigenfunctions.size() < nv*gs.max_eigenfunctions) {
-    cout << "Computing eigenfunctions\n";
+    cout << "Computing eigenfunctions...\n";
     vector<double> f_min;
     vector<double> f_max;
     Eigen::SparseMatrix<double> L = laplacian(gs.m, COTANGENT);
@@ -336,8 +340,8 @@ void Generate_field(GLcanvas & gui, State & gs)
     case RANDOM: gs.f = Random_field(gs.m); break;
     default: cout << "Bad case in switch - This shouldn't happen!\n";
   }
-  if (gs.normalize) normalize_in_01(gs.f);
-  Set_clamp_limits(gs.f, 2, gs.clamp_limits[0]);
+  if (gs.normalize_f) normalize_in_01(gs.f);
+  Set_clamp_limits(gs.f, 2, gs.f_clamp);
   gs.FIELD_IS_PRESENT = true;
 
   if (gs.show_cp) {
@@ -347,8 +351,8 @@ void Generate_field(GLcanvas & gui, State & gs)
   gs.SCALE_SPACE_IS_PRESENT = false;
   if (gs.show_field==2) gs.show_field=1;
   if (gs.show_field==1) {
-    gs.curr_clamp[0]=gs.clamp_limits[0][0];
-    gs.curr_clamp[1]=gs.clamp_limits[0][1];
+    gs.curr_clamp[0]=gs.f_clamp[0];
+    gs.curr_clamp[1]=gs.f_clamp[1];
     ScalarField phi = Clamp_and_rescale_field(vector(gs.f.data(),gs.f.data()+gs.f.size()),gs.curr_clamp);
     phi.copy_to_mesh(gs.m);
     gs.m.show_texture1D(TEXTURE_1D_HSV);
@@ -426,7 +430,7 @@ void Build_disc_ss(GLcanvas &gui, State &gs)
   buf[0]=f1;
 
   cout << "Building scale-space - ";
-  if (gs.method == 1) cout << "linear progression\n"; else cout << "exponential progression\n";
+  if (gs.method == 1) cout << "linear progression...\n"; else cout << "exponential progression...\n";
 
   Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
   for (auto i=1;i<gs.nlevels;i++) {
@@ -440,7 +444,7 @@ void Build_disc_ss(GLcanvas &gui, State &gs)
       step *= gs.mult;
     }
     if (gs.normalize) normalize_in_01(buf[i]);
-    cout << "level "<< i << " completed\n";
+    if (i%10 == 0) cout << "level "<< i << " completed\n";
   }
 
   gs.fields = vector<vector<double>>(gs.nlevels,vector<double>(gs.nverts));
@@ -538,7 +542,11 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
 
     // Field
     ImGui::SeparatorText("Field");
-    ImGui::Combo("Method",&gs.current_field_method,FIELD_METHOD_LABELS,IM_ARRAYSIZE(FIELD_METHOD_LABELS));
+    ImGui::PushItemWidth(200);
+    ImGui::Combo("Method",&gs.current_field_method,FIELD_METHOD_LABELS,IM_ARRAYSIZE(FIELD_METHOD_LABELS)); 
+    ImGui::PopItemWidth();
+    ImGui::SameLine(282);
+    ImGui::Checkbox("Normalize", &gs.normalize_f);
     ImGui::Text("Eigenfunctions:");
     ImGui::PushItemWidth(100);
     ImGui::InputInt("Max",&gs.max_eigenfunctions,1,100); ImGui::SameLine(200);
@@ -629,8 +637,8 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
     if (ImGui::RadioButton("None",&gs.show_field,0)) gs.m.show_poly_color();
     ImGui::SameLine();
     if (ImGui::RadioButton("Base",&gs.show_field,1) && gs.FIELD_IS_PRESENT) {
-        gs.curr_clamp[0]=gs.clamp_limits[0][0];
-        gs.curr_clamp[1]=gs.clamp_limits[0][1];
+        gs.curr_clamp[0]=gs.f_clamp[0];
+        gs.curr_clamp[1]=gs.f_clamp[1];
         ScalarField phi = Clamp_and_rescale_field(vector(gs.f.data(),gs.f.data()+gs.f.size()),gs.curr_clamp);
         phi.copy_to_mesh(gs.m);
         gs.m.show_texture1D(TEXTURE_1D_HSV);
