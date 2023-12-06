@@ -64,8 +64,8 @@ struct State {
     // scale-space
     method = 1; //linear
     normalize = true;
-    nlevels = 100;
-    t_step = 0.001;
+    nlevels = 300;
+    t_step = 0.0001;
     stride = 10;
     mult = 1.05;
     // view
@@ -208,6 +208,26 @@ void InvertSparseMatrix(Eigen::SparseMatrix<double> &Y)
       }
     }
   }
+}
+
+Eigen::SparseMatrix<double> Invert_diag_matrix(const Eigen::SparseMatrix<double> &M) 
+{
+  Eigen::SparseMatrix<double> M_inv;
+  // http://www.alecjacobson.com/weblog/?p=2552
+  if (&M_inv != &M) M_inv = M;
+  // Iterate over outside
+  for (int k = 0; k < M_inv.outerSize(); ++k) {
+    // Iterate over inside
+    for (typename Eigen::SparseMatrix<double>::InnerIterator it(M_inv, k); it; ++it) {
+      if (it.col() == it.row()) {
+        double v = it.value();
+        assert(v != 0);
+        v = 1.0 / v;
+        M_inv.coeffRef(it.row(), it.col()) = v;
+      }
+    }
+  }
+  return M_inv;
 }
 
 // rescale all values of vector to [0,1]
@@ -412,6 +432,73 @@ void print_statistics(const vector<vector<int>> &c)
   }
 }
 
+vector<Eigen::VectorXd> Diffusion_flow(const DrawableTrimesh<> &m, const Eigen::VectorXd &f,
+                                  int nlevels, float t_step = 0.0001, int stride=10, float mult = 1.05,
+                                  bool linear=true, bool normalize=false)
+{
+  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+  Eigen::SparseMatrix<double> MM = mass_matrix(m);
+  vector<Eigen::VectorXd> buf(nlevels);
+  Eigen::VectorXd f1(f);
+
+  cout << "Diffusion: ";
+  if (linear) cout << "linear progression...\n"; else cout << "exponential progression...\n";
+  float step = t_step;
+  if (normalize) normalize_in_01(f1);
+  buf[0]=f1;
+  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
+  for (auto i=1;i<nlevels;i++) {
+    // iterated backward Euler time integration of heat flow equation
+    if (linear) {
+      for (int j=0;j<stride;j++) f1 = LLT.solve(MM * f1);
+      buf[i] = f1;
+    } else {
+      if (i>0) Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
+      buf[i] = LLT.solve(MM * buf[i-1]);
+      step *= mult;
+    }
+    if (normalize) normalize_in_01(buf[i]);
+    if (i%10 == 0) cout << "level "<< i << " completed\n";
+  }
+  return buf;
+}
+
+vector<Eigen::VectorXd> Smoothness_energy_opt(const DrawableTrimesh<> &m, const Eigen::VectorXd &f,
+                                  int nlevels, float w_param = 1000000, int stride=10, float div = 1.05,
+                                  bool linear=true, bool normalize=false)
+{
+  Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
+  Eigen::SparseMatrix<double> M = mass_matrix(m);
+  Eigen::SparseMatrix<double> M_inv = Invert_diag_matrix(M);
+  Eigen::SparseMatrix<double> LML  = L*M_inv*L;
+  vector<Eigen::VectorXd> buf(nlevels);
+  Eigen::VectorXd f1(f);
+
+  cout << "Smoothness energy optimization: ";
+  if (linear) cout << "linear progression...\n"; else cout << "exponential progression...\n";
+  float w = w_param;
+  if (normalize) normalize_in_01(f1);
+  buf[0]=f1;
+
+  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(LML + w*M);
+  for (auto i=1;i<nlevels;i++) {
+    // iterated optimization of energy
+    if (linear) {
+      for (int j=0;j<stride;j++) f1 = LLT.solve(w*M*f1);
+      buf[i] = f1;
+    } else {
+      if (i>0) Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(LML + w*M);
+      buf[i] = LLT.solve(w * M * buf[i-1]);
+      w /= div;
+    }
+    if (normalize) normalize_in_01(buf[i]);
+    if (i%10 == 0) cout << "level "<< i << " completed\n";
+  }
+  return buf;
+}
+
+
+
 void Build_disc_ss(GLcanvas &gui, State &gs)
 // compute a discrete scale-space with "levels" levels from input field f on shape m
 // if linear applies diffusion flow levels * mult times with steady coefficient time_scalar
@@ -420,32 +507,12 @@ void Build_disc_ss(GLcanvas &gui, State &gs)
 // cumulative smoothing: input field at iteration i is the smoothed field at iteration i-1
 // if normalize the result is normalizd in [0,1] at each iteration
 {
-  Eigen::SparseMatrix<double> L  = laplacian(gs.m, COTANGENT);
-  Eigen::SparseMatrix<double> MM = mass_matrix(gs.m);
-  vector<Eigen::VectorXd> buf(gs.nlevels);
-  Eigen::VectorXd f1(gs.f);
-
-  float step = gs.t_step;
-  if (gs.normalize) normalize_in_01(f1);
-  buf[0]=f1;
+  vector<Eigen::VectorXd> buf;
 
   cout << "Building scale-space - ";
-  if (gs.method == 1) cout << "linear progression...\n"; else cout << "exponential progression...\n";
 
-  Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
-  for (auto i=1;i<gs.nlevels;i++) {
-    // iterated backward Euler time integration of heat flow equation
-    if (gs.method == 1) {
-      for (int j=0;j<gs.stride;j++) f1 = LLT.solve(MM * f1);
-      buf[i] = f1;
-    } else {
-      if (i>0) Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
-      buf[i] = LLT.solve(MM * buf[i-1]);
-      step *= gs.mult;
-    }
-    if (gs.normalize) normalize_in_01(buf[i]);
-    if (i%10 == 0) cout << "level "<< i << " completed\n";
-  }
+  // buf = Diffusion_flow(gs.m,gs.f,gs.nlevels,gs.t_step,gs.stride,gs.mult,gs.method==1,gs.normalize);
+  buf = Smoothness_energy_opt(gs.m,gs.f,gs.nlevels,gs.t_step,gs.stride,gs.mult,gs.method==1,gs.normalize);
 
   gs.fields = vector<vector<double>>(gs.nlevels,vector<double>(gs.nverts));
   for (auto i=0;i<buf.size();i++) // convert from Eigen to std::vector
@@ -457,11 +524,13 @@ void Build_disc_ss(GLcanvas &gui, State &gs)
     gs.show_cp = false;
   }
 
+  // set clamp limits for visualization
   gs.clamp_limits = vector<float*>(gs.nlevels);
   for (auto &l : gs.clamp_limits) l = new float[2];
-  for (auto i=0;i<gs.nlevels;i++) // set clamp limits for visualization
+  for (auto i=0;i<gs.nlevels;i++) 
     Set_clamp_limits(buf[i], 2, gs.clamp_limits[i]); 
 
+  // find critical points
   gs.critical = vector<vector<int>>(gs.nlevels,vector<int>(gs.nverts));
   vector<vector<int>> ties; // "flat" edges
   for (auto i=0;i<buf.size();i++) {
@@ -473,9 +542,13 @@ void Build_disc_ss(GLcanvas &gui, State &gs)
       cout << endl;
     }
   }
+
+  //log
   print_statistics(gs.critical);
   cout << "done"<< endl;
 
+  // set state
+  gs.selected_entry = 0;
   gs.SCALE_SPACE_IS_PRESENT = true;
 }
 
@@ -550,7 +623,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
     ImGui::Text("Eigenfunctions:");
     ImGui::PushItemWidth(100);
     ImGui::InputInt("Max",&gs.max_eigenfunctions,1,100); ImGui::SameLine(200);
-    ImGui::InputInt("Selected",&gs.selected_eigenfunction,1,100);
+    ImGui::InputInt("Selected",&gs.selected_eigenfunction,0,99);
     ImGui::PopItemWidth();
       if (ImGui::Button("Generate field")) {
       if (!gs.MESH_IS_LOADED) 
