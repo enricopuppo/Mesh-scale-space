@@ -38,12 +38,17 @@ struct State {
   bool normalize_f;               // base field is normalized
   int max_eigenfunctions, selected_eigenfunction; // parameters for eigenfunction generator
   // Scale space
-  int method;                     // 1 linear; 2 exponential
   bool normalize;                 // fields are normalized at all levels during diffusion
   int nlevels;                    // # levels in the scale-space 
-  float t_step;                   // base time step of diffusion
-  int stride;                     // stride for linear method
-  float mult;                     // multiplicator for exponential method
+  int method;                     // 1 diffusion; 2 smoothness optiization
+  int diff_progression;           // 1 linear - 2 exponential
+  float diff_lambda;              // base time step of diffusion
+  int diff_stride;                // stride for linear method
+  float diff_mult;                // multiplicator for exponential method
+  int opt_progression;            // 1 linear - 2 exponential
+  float opt_w;                    // base regularization of optimization
+  int opt_stride;                 // stride for linear method
+  float opt_div;                  // divisor for exponential method
   // View
   bool show_m, show_wf, show_cp;  // show mesh, wire-frame, critical points
   int show_field;                 // field to show: 0 no field; 1 base field; 2 scale-space field
@@ -62,12 +67,17 @@ struct State {
     selected_eigenfunction = 1;
     f_clamp[0] = 0; f_clamp[1] = 1;
     // scale-space
-    method = 1; //linear
     normalize = true;
     nlevels = 300;
-    t_step = 0.0001;
-    stride = 10;
-    mult = 1.05;
+    method = 1;           //diffusion
+    diff_progression = 1;  //linear
+    diff_lambda = 0.0001;
+    diff_stride = 10;
+    diff_mult = 1.05;
+    opt_progression = 1;  //linear
+     opt_w = 1e6;
+    opt_stride = 10;
+    opt_div = 1.05;
     // view
     show_m = true;
     show_cp = show_wf = false;
@@ -433,7 +443,7 @@ void print_statistics(const vector<vector<int>> &c)
 }
 
 vector<Eigen::VectorXd> Diffusion_flow(const DrawableTrimesh<> &m, const Eigen::VectorXd &f,
-                                  int nlevels, float t_step = 0.0001, int stride=10, float mult = 1.05,
+                                  int nlevels, float diff_lambda = 0.0001, int stride=10, float mult = 1.05,
                                   bool linear=true, bool normalize=false)
 {
   Eigen::SparseMatrix<double> L  = laplacian(m, COTANGENT);
@@ -442,9 +452,10 @@ vector<Eigen::VectorXd> Diffusion_flow(const DrawableTrimesh<> &m, const Eigen::
   Eigen::VectorXd f1(f);
 
   cout << "Diffusion: ";
-  if (linear) cout << "linear progression...\n"; else cout << "exponential progression...\n";
-  float step = t_step;
-  if (normalize) normalize_in_01(f1);
+  if (linear) cout << "linear progression "; else cout << "exponential progression  ";
+  float step = diff_lambda;
+  if (normalize) {normalize_in_01(f1); cout << "with normalization...\n";} 
+  else cout << "without normalization..\n";
   buf[0]=f1;
   Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> LLT(MM - step * L);
   for (auto i=1;i<nlevels;i++) {
@@ -511,8 +522,12 @@ void Build_disc_ss(GLcanvas &gui, State &gs)
 
   cout << "Building scale-space - ";
 
-  // buf = Diffusion_flow(gs.m,gs.f,gs.nlevels,gs.t_step,gs.stride,gs.mult,gs.method==1,gs.normalize);
-  buf = Smoothness_energy_opt(gs.m,gs.f,gs.nlevels,gs.t_step,gs.stride,gs.mult,gs.method==1,gs.normalize);
+  if (gs.method==1)
+    buf = Diffusion_flow(gs.m,gs.f,gs.nlevels,gs.diff_lambda,
+                          gs.diff_stride,gs.diff_mult,gs.diff_progression==1,gs.normalize);
+  else
+    buf = Smoothness_energy_opt(gs.m,gs.f,gs.nlevels,gs.opt_w,
+                                gs.opt_stride,gs.opt_div,gs.opt_progression==1,gs.normalize);
 
   gs.fields = vector<vector<double>>(gs.nlevels,vector<double>(gs.nverts));
   for (auto i=0;i<buf.size();i++) // convert from Eigen to std::vector
@@ -618,7 +633,7 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
     ImGui::PushItemWidth(200);
     ImGui::Combo("Method",&gs.current_field_method,FIELD_METHOD_LABELS,IM_ARRAYSIZE(FIELD_METHOD_LABELS)); 
     ImGui::PopItemWidth();
-    ImGui::SameLine(282);
+    ImGui::SameLine(280);
     ImGui::Checkbox("Normalize", &gs.normalize_f);
     ImGui::Text("Eigenfunctions:");
     ImGui::PushItemWidth(100);
@@ -650,16 +665,43 @@ void Setup_GUI_Callbacks(GLcanvas & gui, State &gs)
 
     // Processing
     ImGui::SeparatorText("Scale-space");
-    ImGui::Text("Progression: "); ImGui::SameLine(100);
-    ImGui::RadioButton("Linear",&gs.method,1); ImGui::SameLine();
-    ImGui::RadioButton("Exponential",&gs.method,2); ImGui::SameLine(282); 
-    ImGui::Checkbox("Normalize", &gs.normalize);
-    ImGui::PushItemWidth(100);
-    ImGui::InputInt("Levels",&gs.nlevels,1,10); ImGui::SameLine(200);
-    ImGui::InputFloat("Time step",&gs.t_step,0.0001,0.001,"%.6f");
-    ImGui::InputInt("Stride (lin)",&gs.stride,1,10); ImGui::SameLine(200);
-    ImGui::InputFloat("Mult. (exp)",&gs.mult,0.001,0.01,"%.3f");
+    ImGui::PushItemWidth(200);
+    ImGui::InputInt("Levels",&gs.nlevels,1,10); ImGui::SameLine(280);
     ImGui::PopItemWidth();
+    ImGui::Checkbox("Normalize", &gs.normalize);
+    ImGui::Text("Method: ");
+    {
+      ImGui::BeginChild("Diffusion",ImVec2(ImGui::GetContentRegionAvail().x*0.5,120));
+      ImGui::RadioButton("Diffusion",&gs.method,1);
+      ImGui::InputFloat("Lambda",&gs.diff_lambda,0.0001,0.001,"%.6f");
+      ImGui::Text("Progression: ");
+      ImGui::RadioButton("Linear",&gs.diff_progression,1); ImGui::SameLine(60);
+      ImGui::PushItemWidth(60);
+      ImGui::InputInt("Stride",&gs.diff_stride,0,0);
+      ImGui::PopItemWidth();
+      ImGui::RadioButton("Exp.",&gs.diff_progression,2);  ImGui::SameLine(60);
+      ImGui::PushItemWidth(60);
+      ImGui::InputFloat("Mult.",&gs.diff_mult,0,0,"%.3f");
+      ImGui::PopItemWidth();
+      ImGui::EndChild();
+    }
+    ImGui::SameLine(); 
+    // ImGui::Text("|"); ImGui::SameLine(); 
+    {
+      ImGui::BeginChild("Optimization",ImVec2(0,120));
+      ImGui::RadioButton("Smoothness opt.",&gs.method,2);
+      ImGui::InputFloat("w",&gs.opt_w,0.0001,0.001,"%.6f");
+      ImGui::Text("Progression: ");
+      ImGui::RadioButton("Linear",&gs.opt_progression,1); ImGui::SameLine(60);
+      ImGui::PushItemWidth(60);
+      ImGui::InputInt("Stride",&gs.opt_stride,0,0);
+      ImGui::PopItemWidth();
+      ImGui::RadioButton("Exp.",&gs.opt_progression,2); ImGui::SameLine(60); 
+      ImGui::PushItemWidth(60);
+      ImGui::InputFloat("Div.",&gs.opt_div,0,0,"%.3f");
+      ImGui::PopItemWidth();
+      ImGui::EndChild();
+    }
     if (ImGui::Button("Compute scale-space")) {
       if (!gs.FIELD_IS_PRESENT) 
         ImGui::OpenPopup("No data!");
